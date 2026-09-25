@@ -240,7 +240,9 @@ pub async fn respects_user_transactions(session: &mut impl Session, schema: &str
     expect_tx(session, "rollback", false).await;
     assert_eq!(changed(session).await, unchanged, "a paged read committed the user's transaction");
 
-    // Nor does a cancel between pages.
+    // Nor does a cancel between pages. (With five rows the read may finish
+    // before the cancel lands; `cancels_between_pages` covers interrupting
+    // it. Either way the user's transaction must still be open.)
     expect_tx(session, "begin", true).await;
     expect_tx(session, "update idedb_user_tx set v = 2", true).await;
     let canceller = session.canceller();
@@ -255,7 +257,7 @@ pub async fn respects_user_transactions(session: &mut impl Session, schema: &str
         })
         .await;
     assert!(
-        matches!(last, Some(QueryEvent::Done { cancelled: true, in_transaction: true, .. })),
+        matches!(last, Some(QueryEvent::Done { in_transaction: true, .. })),
         "a cancel between pages must leave the transaction open: {last:?}"
     );
     collect(session, "rollback", 10).await;

@@ -124,9 +124,11 @@ fn predefined<R: Runtime>(app: &AppHandle<R>, name: Predefined) -> tauri::Result
 
 /// Only web links, and only from menu items we built.
 fn open_url(url: &str) {
-    if !url.starts_with("https://") {
-        return;
-    }
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    if url.starts_with("https://") {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    // IdeDB targets macOS; other platforms only build for CI.
+    #[cfg(not(target_os = "macos"))]
+    let _ = url;
 }

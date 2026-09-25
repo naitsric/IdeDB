@@ -8,7 +8,9 @@ mod history;
 mod secrets;
 
 pub use history::{HistoryEntry, NewHistoryEntry};
-pub use secrets::{Keychain, MemorySecrets, SecretStore};
+#[cfg(target_os = "macos")]
+pub use secrets::Keychain;
+pub use secrets::{MemorySecrets, SecretStore};
 
 use std::path::Path;
 use std::sync::Mutex;

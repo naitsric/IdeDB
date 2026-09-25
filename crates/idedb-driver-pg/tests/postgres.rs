@@ -190,6 +190,90 @@ async fn applies_row_changes() {
     testing::applies_row_changes(&mut s, "public").await;
 }
 
+async fn run_all(s: &mut PgSession, statements: &[&str]) {
+    for sql in statements {
+        let events = collect(s, sql, 10).await;
+        assert!(matches!(events.last(), Some(QueryEvent::Done { .. })), "{sql}: {events:?}");
+    }
+}
+
+#[tokio::test]
+async fn checks_without_running_anything() {
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "create table if not exists idedb_check (id serial primary key, v int)",
+            "insert into idedb_check (v) values (1), (2)",
+            "create sequence if not exists idedb_check_seq",
+        ],
+    )
+    .await;
+    testing::check_runs_nothing(
+        &mut s,
+        &[
+            "insert into idedb_check (v) values (3) returning *",
+            "update idedb_check set v = v + 1",
+            "delete from idedb_check",
+            "select nextval('idedb_check_seq')",
+            "select nextval(pg_get_serial_sequence('idedb_check', 'id'))",
+            "truncate idedb_check",
+            "drop table idedb_check",
+            // Parameters: typed from context, or untyped (not the user's error).
+            "select * from idedb_check where id = $1",
+            "select $1",
+        ],
+        "select (select count(*) from idedb_check), (select sum(v) from idedb_check),
+                (select last_value from idedb_check_seq), (select is_called from idedb_check_seq),
+                (select last_value from idedb_check_id_seq)",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn checks_report_problems_where_postgres_locates_them() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["create table if not exists idedb_check_problems (id int)"]).await;
+    testing::check_reports(&mut s, "select from from idedb_check_problems", "syntax error", Some("from idedb")).await;
+    testing::check_reports(&mut s, "select * from idedb_missing", "\"idedb_missing\" does not exist", Some("idedb_missing"))
+        .await;
+    // Multi-byte text before the problem: positions are in chars.
+    testing::check_reports(
+        &mut s,
+        "select 'ñandú', nope from idedb_check_problems",
+        "column \"nope\" does not exist",
+        Some("nope"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn checks_and_sets_schema() {
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "create schema if not exists idedb_check_s",
+            "create table if not exists idedb_check_s.only_here (id int)",
+            "create table if not exists idedb_check_public (id int)",
+        ],
+    )
+    .await;
+    let sql = "select * from only_here";
+    assert!(s.check(sql, None).await.unwrap().is_some(), "not on the default search path");
+    assert_eq!(s.check(sql, Some("idedb_check_s")).await.unwrap(), None);
+    // The scoped search path did not leak into the session.
+    assert!(s.check(sql, None).await.unwrap().is_some());
+    let events = collect(&mut s, sql, 10).await;
+    assert!(matches!(events.last(), Some(QueryEvent::Error { .. })), "{events:?}");
+
+    s.set_schema("idedb_check_s").await.unwrap();
+    run_all(&mut s, &[sql, "select count(*) from idedb_check_public"]).await; // public stays reachable
+    s.set_schema("public").await.unwrap(); // the default: back to the server's search path
+    let events = collect(&mut s, sql, 10).await;
+    assert!(matches!(events.last(), Some(QueryEvent::Error { .. })), "{events:?}");
+}
+
 /// Values travel as text and are cast to each column's type, so types with
 /// no native `Value` variant are edited and read back exactly.
 #[tokio::test]

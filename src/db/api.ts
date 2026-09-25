@@ -126,6 +126,13 @@ function toJsonChange(change: RowChange): unknown {
   }
 }
 
+/** A problem the engine found in a statement without running it. */
+export interface SqlProblem {
+  message: string;
+  /** Code points into the statement, like a query error's position. */
+  position: number | null;
+}
+
 export interface HistoryEntry {
   id: number;
   dataSourceId: string;
@@ -178,7 +185,16 @@ export const api = {
 
   introspect: (id: SessionId, schema: string) => invoke<SchemaModel>("session_introspect", { id, schema }),
 
-  /** Newest first; `search` is a case-insensitive substring. */
+  /**
+   * Validates a statement without running it, resolving unqualified names
+   * in `schema`. Meant for a data source's explorer session, never a console's.
+   */
+  check: (id: SessionId, sql: string, schema: string | null) =>
+    invoke<SqlProblem | null>("session_check", { id, sql, schema }),
+
+  /** Where unqualified names resolve for a console session's next statements. */
+  setSchema: (id: SessionId, schema: string) => invoke<void>("session_set_schema", { id, schema }),
+
   /** Applies data editor changes in one transaction; the outcome comes back as MessagePack. */
   async apply(id: SessionId, table: TableRef, changes: RowChange[]): Promise<ApplyOutcome> {
     const bytes = await invoke<ArrayBuffer>("session_apply", { id, table, changes: changes.map(toJsonChange) });
@@ -188,6 +204,7 @@ export const api = {
   /** Writes one chunk of an export; `first` truncates the file. */
   exportWrite: (path: string, chunk: string, first: boolean) => invoke<void>("export_write", { path, chunk, first }),
 
+  /** Newest first; `search` is a case-insensitive substring. */
   history: (dataSourceId: string | null, search: string | null, limit: number) =>
     invoke<HistoryEntry[]>("history_list", { dataSourceId, search, limit }),
 

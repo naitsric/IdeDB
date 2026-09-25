@@ -96,7 +96,8 @@ src/                 React UI
   commands/          command registry, keymap, app commands, Search Everywhere
   actions.ts         user-level actions shared by commands, menus and search
   workbench/         window chrome, dockable panels (explorer, consoles, result tabs)
-  editor/            SQL editor (CodeMirror 6), statement splitting, completion
+  editor/            SQL editor (CodeMirror 6): statement splitting, completion (with
+                     FK joins), live diagnostics, go to declaration, formatting
   explorer/          Database Explorer tree
   dialogs/           data source and password dialogs
   grid/              result grid (Glide Data Grid behind our own props) and the data
@@ -113,7 +114,12 @@ crates/
 
 Every driver implements `idedb_core::Session` and runs the shared conformance
 checks in `idedb_core::testing` (paging, cancellation, errors, data editor
-changes), so all engines behave the same behind the UI.
+changes, checking without running), so all engines behave the same behind the UI.
+
+Live diagnostics come from the engine itself: shortly after typing stops, the
+statements on screen are prepared (never executed) on the data source's
+explorer session, so the editor flags exactly what the server would reject,
+names and types included, without a SQL parser of our own.
 
 Every user action is a registered command (`src/commands/registry.ts`) with
 an id, a title and optionally a keybinding. Registering it is enough for it to

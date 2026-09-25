@@ -197,6 +197,38 @@ pub async fn applies_row_changes(session: &mut impl Session, schema: &str) {
     assert_usable(session).await;
 }
 
+/// Checking is validation only: `statements` must all be valid, and after
+/// checking them `probe` (a query over whatever they would change: row
+/// counts, sequence values, tables) returns exactly what it did before.
+pub async fn check_runs_nothing(session: &mut impl Session, statements: &[&str], probe: &str) {
+    let before = collect(session, probe, 100).await;
+    assert!(matches!(before.last(), Some(QueryEvent::Done { .. })), "probe failed: {before:?}");
+    for sql in statements {
+        let problem = session.check(sql, None).await.expect("check");
+        assert_eq!(problem, None, "{sql} should check clean");
+    }
+    assert_eq!(rows(&collect(session, probe, 100).await), rows(&before), "checking ran a statement");
+    assert_usable(session).await;
+}
+
+/// `sql` is invalid: checking it reports a problem mentioning `fragment`,
+/// located at the first occurrence of `at` in `sql` (`None` when the engine
+/// cannot locate it), and leaves the session usable.
+pub async fn check_reports(session: &mut impl Session, sql: &str, fragment: &str, at: Option<&str>) {
+    let problem = session
+        .check(sql, None)
+        .await
+        .expect("check")
+        .unwrap_or_else(|| panic!("{sql} should not check clean"));
+    assert!(problem.message.contains(fragment), "{sql}: unexpected problem {problem:?}");
+    let expected = at.map(|needle| {
+        let byte = sql.find(needle).unwrap_or_else(|| panic!("{needle} not in {sql}"));
+        sql[..byte].chars().count() as u32
+    });
+    assert_eq!(problem.position, expected, "{sql}: wrong position in {problem:?}");
+    assert_usable(session).await;
+}
+
 pub async fn assert_usable(session: &mut impl Session) {
     let events = collect(session, "select 1", 10).await;
     assert_eq!(rows(&events), vec![vec![Value::Int(1)]], "session unusable: {events:?}");

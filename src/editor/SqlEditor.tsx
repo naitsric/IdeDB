@@ -1,7 +1,7 @@
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
-import { diagnosticCount, lintKeymap, setDiagnostics } from "@codemirror/lint";
+import { lintKeymap } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
 import { Compartment, EditorState } from "@codemirror/state";
 import {
@@ -18,6 +18,7 @@ import {
 import { useEffect, useRef } from "react";
 import type { Engine } from "../db/api";
 import { renderCompletionIcon, sqlLanguageSupport, type CompletionCatalog } from "./completion";
+import { sqlDiagnostics, type LintBackend } from "./diagnostics";
 import { editorApi } from "./editorApi";
 import { currentStatementHighlight, flashField, intellijKeymap, statementsField } from "./extensions";
 import { registerEditor } from "./registry";
@@ -31,18 +32,24 @@ interface SqlEditorProps {
   onChange: (sql: string) => void;
   /** Live view of the data source's schemas for completion; read at each request. */
   catalog: CompletionCatalog;
+  /** Where live diagnostics are checked; read at each check. */
+  lint: LintBackend;
 }
 
 /** The console's SQL editor: CodeMirror 6 with dialect-aware highlighting and completion. */
-export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog }: SqlEditorProps) {
+export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog, lint }: SqlEditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const language = useRef(new Compartment());
-  const latest = useRef({ initialValue, onChange, catalog });
-  latest.current = { initialValue, onChange, catalog };
+  const latest = useRef({ initialValue, onChange, catalog, lint });
+  latest.current = { initialValue, onChange, catalog, lint };
 
   useEffect(() => {
     const statements = statementsField(engine);
+    const liveLint: LintBackend = {
+      context: () => latest.current.lint.context(),
+      check: (sql) => latest.current.lint.check(sql),
+    };
 
     const editor = new EditorView({
       parent: host.current!,
@@ -69,6 +76,7 @@ export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog }
           statements,
           currentStatementHighlight(statements),
           flashField,
+          sqlDiagnostics(statements, engine, liveLint),
           language.current.of(sqlLanguageSupport(engine, latest.current.catalog)),
           editorTheme,
           editorHighlighting,
@@ -84,12 +92,7 @@ export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog }
             indentWithTab,
           ]),
           EditorView.updateListener.of((update) => {
-            if (!update.docChanged) return;
-            latest.current.onChange(update.state.doc.toString());
-            // An error marker describes text that no longer exists once edited.
-            if (diagnosticCount(update.state) > 0) {
-              queueMicrotask(() => update.view.dispatch(setDiagnostics(update.view.state, [])));
-            }
+            if (update.docChanged) latest.current.onChange(update.state.doc.toString());
           }),
           EditorView.contentAttributes.of({
             "aria-label": "SQL console",
@@ -114,5 +117,5 @@ export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog }
     view.current?.dispatch({ effects: language.current.reconfigure(sqlLanguageSupport(engine, catalog)) });
   }, [engine, catalog]);
 
-  return <div ref={host} className="size-full overflow-hidden" />;
+  return <div ref={host} data-focus-context="editor" className="size-full overflow-hidden" />;
 }

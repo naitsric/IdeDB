@@ -1,10 +1,11 @@
-import { setDiagnostics } from "@codemirror/lint";
 import type { StateField } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import type { Engine } from "../db/api";
+import { problemRange, refreshDiagnostics, showExecutionError } from "./diagnostics";
 import { flashRange } from "./extensions";
+import { formatSql } from "./format";
 import type { EditorApi } from "./registry";
-import { codePointToUtf16, pickStatement, statementsIn, type Statement } from "./statements";
+import { pickStatement, statementsIn, type Statement } from "./statements";
 
 /** The {@link EditorApi} of one editor view. */
 export function editorApi(view: EditorView, engine: Engine, statements: StateField<Statement[]>): EditorApi {
@@ -33,24 +34,35 @@ export function editorApi(view: EditorView, engine: Engine, statements: StateFie
     flash: (range) => flashRange(view, range),
 
     showError(statement, message, position) {
-      // Clamped: the text may have changed while the statement ran.
-      const end = Math.min(statement.to, view.state.doc.length);
-      const from = Math.min(
-        position === undefined ? statement.from : statement.from + codePointToUtf16(statement.text, position),
-        end,
-      );
-      const to = tokenEnd(view.state.doc.sliceString(from, end), from);
-      view.dispatch(setDiagnostics(view.state, [{ from, to, severity: "error", message }]));
+      // Clamped inside `problemRange`: the text may have changed while the statement ran.
+      showExecutionError(view, { ...problemRange(view.state.doc, statement, position), severity: "error", message });
     },
 
-    clearErrors: () => view.dispatch(setDiagnostics(view.state, [])),
+    clearErrors: () => showExecutionError(view, null),
+
+    refreshDiagnostics: () => refreshDiagnostics(view),
+
+    reformat() {
+      const { from, to, empty, head } = view.state.selection.main;
+      const range = empty ? pickStatement(view.state.field(statements), head) : { from, to };
+      if (!range) return false;
+      const original = view.state.sliceDoc(range.from, range.to);
+      const formatted = formatSql(original, engine);
+      if (formatted === null) return false;
+      if (formatted !== original) {
+        // One transaction: a single undo step restores the original text.
+        view.dispatch({
+          changes: { from: range.from, to: range.to, insert: formatted },
+          selection: empty ? { anchor: range.from } : { anchor: range.from, head: range.from + formatted.length },
+          scrollIntoView: true,
+          userEvent: "input.format",
+        });
+      }
+      return true;
+    },
+
+    caret: () => ({ state: view.state, pos: view.state.selection.main.head }),
 
     focus: () => view.focus(),
   };
-}
-
-/** End of the word starting at `from`, so the error underline covers one token. */
-function tokenEnd(rest: string, from: number): number {
-  const word = /^[\p{L}\p{N}_$"`.]+/u.exec(rest)?.[0].length ?? 0;
-  return from + (word || Math.min(1, rest.length));
 }

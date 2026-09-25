@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use idedb_core::{
     ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, QueryEvent, Result, Row,
-    RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SslMode, TableRef,
+    RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode, TableRef,
 };
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
@@ -30,11 +30,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const QUERY_INTERRUPTED: u16 = 1317;
 /// `ER_NO_SUCH_THREAD`: the connection to kill is already gone.
 const NO_SUCH_THREAD: u16 = 1094;
+/// `ER_UNSUPPORTED_PS`: the statement cannot be prepared, only run.
+const UNSUPPORTED_PS: u16 = 1295;
 
 pub struct MySqlSession {
     conn: Conn,
     opts: Opts,
     server: ServerInfo,
+    /// Current database: the connect-time one until `set_schema` changes it.
+    /// Restored when a broken connection is replaced.
+    database: Option<String>,
     cancel: Arc<CancelState>,
     /// Set after a fatal (I/O or protocol) error; the next call reconnects.
     broken: bool,
@@ -170,6 +175,7 @@ impl MySqlSession {
                 version: String::new(),
                 default_schema: None,
             },
+            database: None,
             broken: false,
         };
         let (version, database): (String, Option<String>) = session
@@ -179,14 +185,14 @@ impl MySqlSession {
             .map_err(|e| Error::Connect(format_error(&e)))?
             .unwrap_or_default();
         session.server.version = version;
-        session.server.default_schema = database;
+        session.server.default_schema = database.clone();
+        session.database = database;
         Ok(session)
     }
 
     /// Replaces a connection that failed fatally, keeping the selected database.
     async fn reconnect(&mut self) -> Result<(), mysql_async::Error> {
-        let database = self.server.default_schema.clone();
-        let opts = OptsBuilder::from_opts(self.opts.clone()).db_name(database);
+        let opts = OptsBuilder::from_opts(self.opts.clone()).db_name(self.database.clone());
         let conn = Conn::new(opts).await?;
         self.cancel.connection_id.store(conn.id(), Ordering::SeqCst);
         self.conn = conn;
@@ -303,10 +309,10 @@ impl Session for MySqlSession {
             }
             Err(e) => {
                 self.broken |= e.is_fatal();
-                // MySQL reports locations only as text ("near '…' at line 1").
+                let message = format_error(&e);
                 QueryEvent::Error {
-                    message: format_error(&e),
-                    position: None,
+                    position: near_position(sql, &message),
+                    message,
                 }
             }
         });
@@ -332,6 +338,58 @@ impl Session for MySqlSession {
             .await
             .map_err(|e| self.query_error(e))
     }
+
+    /// A server-side prepare (`COM_STMT_PREPARE`), closed right away: MySQL
+    /// parses the statement and resolves its tables and columns, and runs
+    /// nothing. With a schema, the session switches to that database first
+    /// (it only ever serves checks and introspection, which name schemas
+    /// explicitly).
+    async fn check(&mut self, sql: &str, schema: Option<&str>) -> Result<Option<SqlProblem>> {
+        self.ensure_connected().await?;
+        if let Some(schema) = schema {
+            self.set_schema(schema).await?;
+        }
+        match self.conn.prep(sql).await {
+            Ok(statement) => {
+                self.conn.close(statement).await.map_err(|e| self.query_error(e))?;
+                Ok(None)
+            }
+            Err(mysql_async::Error::Server(e)) if e.code == UNSUPPORTED_PS => Ok(None),
+            Err(e @ mysql_async::Error::Server(_)) => {
+                let message = format_error(&e);
+                Ok(Some(SqlProblem { position: near_position(sql, &message), message }))
+            }
+            Err(e) => Err(self.query_error(e)),
+        }
+    }
+
+    async fn set_schema(&mut self, schema: &str) -> Result<()> {
+        self.ensure_connected().await?;
+        if self.database.as_deref() == Some(schema) {
+            return Ok(());
+        }
+        self.conn
+            .query_drop(format!("USE {}", apply::quote(schema)))
+            .await
+            .map_err(|e| self.query_error(e))?;
+        self.database = Some(schema.to_owned());
+        Ok(())
+    }
+}
+
+/// MySQL locates syntax errors only in the message text, as `near '<the
+/// statement from the error on>' at line N` (cut at 80 characters). Finds
+/// that text in the statement, from line N on, as a char offset.
+fn near_position(sql: &str, message: &str) -> Option<u32> {
+    const NEAR: &str = " near '";
+    const AT_LINE: &str = "' at line ";
+    let start = message.find(NEAR)? + NEAR.len();
+    let end = message.rfind(AT_LINE)?;
+    let snippet = message.get(start..end)?;
+    let line: usize = message[end + AT_LINE.len()..].trim().parse().ok()?;
+    let line_start: usize = sql.split_inclusive('\n').take(line.saturating_sub(1)).map(str::len).sum();
+    let byte = if snippet.is_empty() { sql.len() } else { line_start + sql.get(line_start..)?.find(snippet)? };
+    Some(sql[..byte].chars().count() as u32)
 }
 
 impl MySqlSession {
@@ -387,5 +445,31 @@ fn format_error(e: &mysql_async::Error) -> String {
     match e {
         mysql_async::Error::Server(s) => format!("ERROR {} ({}): {}", s.code, s.state, s.message),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::near_position;
+
+    const SYNTAX: &str = "ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that \
+                          corresponds to your MySQL server version for the right syntax to use near ";
+
+    #[test]
+    fn locates_the_near_text_from_its_line_in_chars() {
+        let sql = "select 'ñ' from t;\nselect from t";
+        assert_eq!(near_position(sql, &format!("{SYNTAX}'from t' at line 2")), Some(26));
+        // The same text on an earlier line is not the one MySQL means.
+        assert_eq!(near_position(sql, &format!("{SYNTAX}'from t' at line 1")), Some(11));
+    }
+
+    #[test]
+    fn places_an_error_at_the_end_when_the_near_text_is_empty() {
+        assert_eq!(near_position("select 1 +", &format!("{SYNTAX}'' at line 1")), Some(10));
+    }
+
+    #[test]
+    fn has_no_position_without_near_text() {
+        assert_eq!(near_position("select * from t", "ERROR 1146 (42S02): Table 'idedb.t' doesn't exist"), None);
     }
 }

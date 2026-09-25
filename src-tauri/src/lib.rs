@@ -47,6 +47,8 @@ pub fn run() {
             sessions::session_introspect,
             sessions::history_list,
             sessions::session_apply,
+            sessions::session_check,
+            sessions::session_set_schema,
             export::export_write,
         ])
         .run(tauri::generate_context!())

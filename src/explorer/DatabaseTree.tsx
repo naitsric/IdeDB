@@ -10,7 +10,7 @@ import {
   Search,
   Table2,
 } from "lucide-react";
-import { useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Tree, type NodeApi, type NodeRendererProps, type TreeApi } from "react-arborist";
 import { openTableData } from "../actions";
 import { useDataSources } from "../db/dataSources";
@@ -24,24 +24,66 @@ import {
 import { EngineIcon } from "../ui/EngineIcon";
 import { cx, StatusDot } from "../ui/primitives";
 import { useElementSize } from "../ui/useElementSize";
+import { useExplorerReveal } from "./reveal";
 import { useExplorerSelection, type ExplorerSelection } from "./selection";
 import { buildTree, type TreeNode } from "./treeData";
+
+function containsNode(nodes: readonly TreeNode[], id: string): boolean {
+  return nodes.some((n) => n.id === id || (!!n.children && containsNode(n.children, id)));
+}
 
 const ROW_HEIGHT = 24;
 const STATUS_TONE = { connected: "success", connecting: "warning", error: "danger" } as const;
 
 export function DatabaseTree() {
-  const { sources, explorers, showSystemSchemas, connect, loadSchema } = useDataSources();
+  const { sources, explorers, showSystemSchemas, connect, loadSchema, toggleSystemSchemas } = useDataSources();
   const [openTables, setOpenTables] = useState<ReadonlySet<string>>(new Set());
   const [query, setQuery] = useState("");
   const [menuNode, setMenuNode] = useState<TreeNode | null>(null);
   const tree = useRef<TreeApi<TreeNode> | null>(null);
   const { ref: container, width, height } = useElementSize<HTMLDivElement>();
+  const reveal = useExplorerReveal((s) => s.request);
 
   const data = useMemo(
     () => buildTree(sources, explorers, showSystemSchemas, openTables),
     [sources, explorers, showSystemSchemas, openTables],
   );
+
+  // Go to Declaration: load whatever the path needs, one step per render, then select the node.
+  useEffect(() => {
+    const api = tree.current;
+    if (!reveal || !api) return;
+    const done = () => useExplorerReveal.setState({ request: null });
+    const { sourceId, schema, table, column } = reveal;
+    const explorer = explorers[sourceId];
+    if (!explorer) return void connect(sourceId);
+    if (explorer.status === "error") return done();
+    if (explorer.status !== "connected" || !explorer.schemas) return;
+
+    const info = explorer.schemas.find((s) => s.name === schema);
+    if (!info) return done();
+    if (info.isSystem && !showSystemSchemas && schema !== explorer.server?.defaultSchema) return toggleSystemSchemas();
+    const tableId = table ? `tb:${sourceId}/${schema}/${table}` : undefined;
+    if (tableId) {
+      const load = explorer.models[schema];
+      if (!load) return void loadSchema(sourceId, schema);
+      if (load.state === "loading") return;
+      if (load.state === "error") return done();
+      if (column && !openTables.has(tableId)) return setOpenTables((prev) => new Set(prev).add(tableId));
+    }
+
+    done();
+    const target = column ? `co:${sourceId}/${schema}/${table}/${column}` : (tableId ?? `sc:${sourceId}/${schema}`);
+    if (!containsNode(data, target)) return;
+    // A speed-search filter could hide the node.
+    setQuery("");
+    api.openParents(target);
+    void api.scrollTo(target, "center")?.then(() => {
+      api.select(target);
+      const element = api.listEl.current;
+      (element?.closest<HTMLElement>('[role="tree"]') ?? element)?.focus();
+    });
+  }, [reveal, explorers, data, openTables, showSystemSchemas, width, height, connect, loadSchema, toggleSystemSchemas]);
 
   const onToggle = (id: string) => {
     const node = tree.current?.get(id);

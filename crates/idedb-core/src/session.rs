@@ -1,6 +1,8 @@
 use std::future::Future;
 
-use crate::{ApplyOutcome, QueryEvent, Result, RowChange, SchemaInfo, SchemaModel, ServerInfo, TableRef};
+use crate::{
+    ApplyOutcome, QueryEvent, Result, RowChange, SchemaInfo, SchemaModel, ServerInfo, SqlProblem, TableRef,
+};
 
 /// An open connection to one database server, implemented by each driver.
 ///
@@ -48,6 +50,25 @@ pub trait Session: Send + 'static {
         table: &TableRef,
         changes: &[RowChange],
     ) -> impl Future<Output = Result<ApplyOutcome>> + Send;
+
+    /// Validates one statement the way the engine does before running it
+    /// (syntax, and the names and types it resolves when preparing) without
+    /// executing anything. `schema` is where unqualified names resolve for
+    /// this check only, e.g. a console's current schema; `None` keeps the
+    /// session's own.
+    ///
+    /// `Ok(None)` also covers statements the engine cannot validate without
+    /// running them. `Err` is left for when the session itself failed.
+    fn check(
+        &mut self,
+        sql: &str,
+        schema: Option<&str>,
+    ) -> impl Future<Output = Result<Option<SqlProblem>>> + Send;
+
+    /// Makes `schema` where unqualified names resolve for the statements that
+    /// follow: the head of Postgres' `search_path`, MySQL's current database.
+    /// A no-op for SQLite, which resolves names across attached databases.
+    fn set_schema(&mut self, schema: &str) -> impl Future<Output = Result<()>> + Send;
 }
 
 pub trait Canceller: Clone + Send + Sync + 'static {

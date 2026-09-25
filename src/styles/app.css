@@ -1,0 +1,197 @@
+@import "tailwindcss";
+@import "./dockview-theme.css";
+
+/*
+ * Design tokens. Every color in the app (CSS, Tailwind classes, dockview and
+ * the canvas-rendered grid) resolves from these. The resolved theme is set
+ * on <html data-theme> by src/theme.ts.
+ */
+:root {
+  --font-ui: "Inter Variable", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-code: "JetBrains Mono Variable", ui-monospace, "SF Mono", monospace;
+
+  --titlebar-height: 38px;
+  --statusbar-height: 24px;
+  --traffic-lights-inset: 78px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f4f5;
+  --bg-panel: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-inset: #fafafa;
+  --bg-hover: rgb(0 0 0 / 0.045);
+  --bg-active: rgb(0 0 0 / 0.08);
+  --border: #e4e4e7;
+  --border-strong: #d4d4d8;
+  --fg: #18181b;
+  --fg-muted: #52525b;
+  --fg-subtle: #a1a1aa;
+  --accent: #3563e9;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(53 99 233 / 0.12);
+  --selection: rgb(53 99 233 / 0.16);
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #dc2626;
+  --shadow-popover: 0 12px 32px rgb(0 0 0 / 0.14), 0 2px 6px rgb(0 0 0 / 0.08);
+
+  /* SQL editor */
+  --syntax-keyword: #2c4fd6;
+  --syntax-string: #1a7f37;
+  --syntax-number: #c05f00;
+  --syntax-comment: #8b8b93;
+  --syntax-function: #8250df;
+  --syntax-type: #0e7d8a;
+  --syntax-operator: #52525b;
+  --syntax-identifier: #9a6700;
+  --editor-active-line: rgb(0 0 0 / 0.03);
+  --editor-statement: rgb(53 99 233 / 0.055);
+  --editor-flash: rgb(53 99 233 / 0.28);
+  --editor-match: rgb(245 190 10 / 0.35);
+  --editor-bracket: rgb(53 99 233 / 0.18);
+
+  /* Data editor: pending changes */
+  --edit-modified: rgb(53 99 233 / 0.14);
+  --edit-inserted: rgb(21 128 61 / 0.13);
+  --edit-deleted: rgb(220 38 38 / 0.12);
+  --edit-deleted-fg: #a1a1aa;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111113;
+  --bg-panel: #19191c;
+  --bg-elevated: #222226;
+  --bg-inset: #151517;
+  --bg-hover: rgb(255 255 255 / 0.05);
+  --bg-active: rgb(255 255 255 / 0.09);
+  --border: #27272b;
+  --border-strong: #3a3a40;
+  --fg: #e8e8eb;
+  --fg-muted: #a1a1aa;
+  --fg-subtle: #6b6b74;
+  --accent: #6390ff;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(99 144 255 / 0.16);
+  --selection: rgb(99 144 255 / 0.22);
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --shadow-popover: 0 16px 40px rgb(0 0 0 / 0.5), 0 2px 8px rgb(0 0 0 / 0.35);
+
+  /* SQL editor */
+  --syntax-keyword: #cf8e6d;
+  --syntax-string: #6aab73;
+  --syntax-number: #2aacb8;
+  --syntax-comment: #7a7e85;
+  --syntax-function: #56a8f5;
+  --syntax-type: #c77dbb;
+  --syntax-operator: #bcbec4;
+  --syntax-identifier: #d5b778;
+  --editor-active-line: rgb(255 255 255 / 0.035);
+  --editor-statement: rgb(99 144 255 / 0.07);
+  --editor-flash: rgb(99 144 255 / 0.3);
+  --editor-match: rgb(245 190 10 / 0.22);
+  --editor-bracket: rgb(99 144 255 / 0.25);
+
+  /* Data editor: pending changes */
+  --edit-modified: rgb(99 144 255 / 0.2);
+  --edit-inserted: rgb(74 222 128 / 0.14);
+  --edit-deleted: rgb(248 113 113 / 0.15);
+  --edit-deleted-fg: #6b6b74;
+}
+
+@theme inline {
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-code);
+  --color-bg: var(--bg);
+  --color-panel: var(--bg-panel);
+  --color-elevated: var(--bg-elevated);
+  --color-inset: var(--bg-inset);
+  --color-hover: var(--bg-hover);
+  --color-active: var(--bg-active);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-subtle: var(--fg-subtle);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --shadow-popover: var(--shadow-popover);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+}
+
+/*
+ * Native-app chrome: no page scroll or rubber-banding, no selectable UI
+ * text, arrow cursor everywhere. Text stays selectable where it is content.
+ */
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+input,
+textarea,
+[contenteditable],
+.selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+button,
+a {
+  cursor: default;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Thin overlay-style scrollbars, like the native ones. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* Brief highlight of a statement as it runs; see src/editor/extensions.ts. */
+@keyframes idedb-flash {
+  from {
+    background-color: var(--editor-flash);
+  }
+  to {
+    background-color: transparent;
+  }
+}

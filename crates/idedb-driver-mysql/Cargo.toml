@@ -1,0 +1,14 @@
+[package]
+name = "idedb-driver-mysql"
+description = "MySQL driver for idedb (mysql_async)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+idedb-core.workspace = true
+mysql_async.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+idedb-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }

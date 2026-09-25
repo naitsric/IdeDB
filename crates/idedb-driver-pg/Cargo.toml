@@ -1,0 +1,21 @@
+[package]
+name = "idedb-driver-pg"
+description = "PostgreSQL driver for idedb (tokio-postgres)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+idedb-core.workspace = true
+fallible-iterator = "0.2"
+native-tls.workspace = true
+postgres-native-tls.workspace = true
+postgres-protocol = "0.6"
+serde_json.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+idedb-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }

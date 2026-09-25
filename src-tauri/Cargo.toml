@@ -1,0 +1,26 @@
+[package]
+name = "idedb"
+description = "SQL client with DataGrip-grade UX"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# The `_lib` suffix avoids a lib/bin name clash on Windows,
+# see https://github.com/rust-lang/cargo/issues/8519
+name = "idedb_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+idedb-core.workspace = true
+idedb-driver-mysql.workspace = true
+idedb-driver-pg.workspace = true
+idedb-driver-sqlite.workspace = true
+idedb-store.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tokio.workspace = true

@@ -207,8 +207,18 @@ export const api = {
     return decode(new Uint8Array(bytes), { useBigInt64: true }) as ApplyOutcome;
   },
 
-  /** Writes one chunk of an export; `first` truncates the file. */
-  exportWrite: (path: string, chunk: string, first: boolean) => invoke<void>("export_write", { path, chunk, first }),
+  /**
+   * Asks the user where to export (the dialog runs in the backend) and
+   * returns a token for that file, or `null` if cancelled. The UI never
+   * handles a path, so it cannot write anywhere else.
+   */
+  exportBegin: (fileName: string, formatName: string, extension: string) =>
+    invoke<{ token: number; fileName: string } | null>("export_begin", { fileName, formatName, extension }),
+
+  /** Appends one chunk to the export's file. */
+  exportWrite: (token: number, chunk: string) => invoke<void>("export_write", { token, chunk }),
+
+  exportFinish: (token: number) => invoke<void>("export_finish", { token }),
 
   /** Newest first; `search` is a case-insensitive substring. */
   history: (dataSourceId: string | null, search: string | null, limit: number) =>

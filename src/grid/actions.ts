@@ -1,5 +1,4 @@
 import type { DataEditorRef, GridSelection } from "@glideapps/glide-data-grid";
-import { save } from "@tauri-apps/plugin-dialog";
 import { openTableData } from "../actions";
 import { api, errorMessage, type Value } from "../db/api";
 import { effectiveSchema, rowGetter, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
@@ -272,16 +271,19 @@ export async function exportResult(format: ExportFormat) {
   if (!grid || !engine) return;
   const { result } = grid;
   const extension = EXPORT_EXTENSION[format];
-  const path = await save({
-    defaultPath: `${result.table?.name ?? "result"}.${extension}`,
-    filters: [{ name: EXPORT_LABEL[format], extensions: [extension] }],
-  });
-  if (!path) return;
+  const notice = (message: string) => useGrids.setState((s) => ({ notices: { ...s.notices, [result.id]: message } }));
+  let target: { token: number; fileName: string } | null;
+  try {
+    target = await api.exportBegin(`${result.table?.name ?? "result"}.${extension}`, EXPORT_LABEL[format], extension);
+  } catch (e) {
+    notice(`Export failed: ${errorMessage(e)}`);
+    return;
+  }
+  if (!target) return;
 
   const getRow = rowGetter(result.id);
   const columns = result.columns.map((c) => c.name);
   const total = result.rowCount;
-  const notice = (message: string) => useGrids.setState((s) => ({ notices: { ...s.notices, [result.id]: message } }));
   try {
     for (let from = 0; from < Math.max(total, 1); from += EXPORT_CHUNK_ROWS) {
       const rows: Value[][] = [];
@@ -305,11 +307,13 @@ export async function exportResult(format: ExportFormat) {
           chunk = (rows.length ? toInserts(engine.engine, result.table ?? null, engine.defaultSchema, columns, rows) + "\n" : "");
           break;
       }
-      await api.exportWrite(path, chunk, first);
+      await api.exportWrite(target.token, chunk);
     }
-    notice(`Exported ${total.toLocaleString("en-US")} rows to ${path.split("/").pop()}`);
+    notice(`Exported ${total.toLocaleString("en-US")} rows to ${target.fileName}`);
   } catch (e) {
     notice(`Export failed: ${errorMessage(e)}`);
+  } finally {
+    void api.exportFinish(target.token).catch(() => {});
   }
 }
 

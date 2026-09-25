@@ -12,19 +12,28 @@
 //!
 //! Whether the user has a transaction block open is asked of the server
 //! (see [`PgSession::transaction_open`]), never guessed from the SQL.
+//!
+//! A read with a fetch limit pauses on a SQL cursor (`DECLARE`/`FETCH`),
+//! which needs no borrowed `Transaction` to survive between calls: outside a
+//! block it lives in a read transaction of the driver's own, inside the
+//! user's block in a savepoint. Either way it holds a snapshot and the locks
+//! of its tables while paused, so the app closes idle results after a while.
+//! Statements a cursor cannot hold are read whole, as without a limit.
 
 mod apply;
 mod decode;
 mod introspect;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{TryStreamExt, pin_mut};
 use idedb_core::{
-    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, QueryEvent, Result, Row,
-    RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode, TableRef,
+    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged, Pager,
+    QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
+    TableRef,
 };
 use postgres_native_tls::MakeTlsConnector;
 use tokio::sync::Notify;
@@ -46,6 +55,23 @@ pub struct PgSession {
     in_transaction: bool,
     /// Head of the search path set with `set_schema`, restored on reconnect.
     schema: Option<String>,
+    /// The rest of a read that paused at its fetch limit.
+    open: Option<OpenResult>,
+}
+
+/// Name of the cursor (and, inside the user's block, the savepoint) that
+/// holds a paused read.
+const CURSOR: &str = "idedb_result";
+
+/// A read paused at its fetch limit, on the [`CURSOR`].
+struct OpenResult {
+    /// In a savepoint of the user's transaction block; otherwise in a
+    /// transaction the driver began for the read.
+    in_user_transaction: bool,
+    /// The row read past the last fetch's limit, first in line for the next.
+    held: Option<Row>,
+    /// `FETCH FORWARD n` statements prepared so far, by `n`.
+    fetches: HashMap<usize, Statement>,
 }
 
 /// Cancels the statement currently running on a session. Cloneable so it can
@@ -124,6 +150,16 @@ struct Ran {
     /// Transaction state after the statement, when it is known without
     /// asking the server (a read cannot open or close a transaction block).
     in_transaction: Option<bool>,
+    /// Paused at the fetch limit with the rest open.
+    has_more: bool,
+}
+
+/// What reading from the open result did: rows taken, whether a cancel
+/// stopped it, and whether the result is still open.
+struct Pumped {
+    rows: u64,
+    cancelled: bool,
+    has_more: bool,
 }
 
 impl PgSession {
@@ -163,7 +199,7 @@ impl PgSession {
             guard: Mutex::new(Guard::default()),
             request_done: Notify::new(),
         });
-        Ok(Self { client, config, cancel, server, connection, in_transaction: false, schema: None })
+        Ok(Self { client, config, cancel, server, connection, in_transaction: false, schema: None, open: None })
     }
 
     /// Replaces a lost connection, restoring the search path the console chose.
@@ -177,6 +213,8 @@ impl PgSession {
         self.client = client;
         self.connection = connection;
         self.in_transaction = false;
+        // Whatever was paused went with the old connection.
+        self.open = None;
         Ok(())
     }
 
@@ -235,7 +273,7 @@ impl PgSession {
     async fn run(
         &mut self,
         sql: &str,
-        page_size: usize,
+        fetch: Fetch,
         emit: &mut (dyn FnMut(QueryEvent) + Send),
     ) -> Result<Ran, tokio_postgres::Error> {
         let statement = self.client.prepare(sql).await?;
@@ -245,7 +283,7 @@ impl PgSession {
         // work), inside one as part of it.
         if statement.columns().is_empty() {
             let affected = self.client.execute(&statement, &[]).await?;
-            return Ok(Ran { row_count: affected, cancelled: false, in_transaction: None });
+            return Ok(Ran { row_count: affected, cancelled: false, in_transaction: None, has_more: false });
         }
 
         emit(QueryEvent::Columns {
@@ -257,12 +295,174 @@ impl PgSession {
         });
 
         let inside = self.transaction_open().await?;
+        if fetch.limit.is_some() && self.open_cursor(sql, inside).await? {
+            let pumped = self.pump_or_abort(fetch, emit).await?;
+            return Ok(Ran {
+                row_count: pumped.rows,
+                cancelled: pumped.cancelled,
+                in_transaction: Some(inside),
+                has_more: pumped.has_more,
+            });
+        }
+        // Read whole: no limit, or a statement a cursor cannot hold.
         let (row_count, cancelled) = if inside {
-            self.read_in_user_transaction(&statement, sql, page_size, emit).await?
+            self.read_in_user_transaction(&statement, sql, fetch.page_size, emit).await?
         } else {
-            self.read_in_own_transaction(&statement, page_size, emit).await?
+            self.read_in_own_transaction(&statement, fetch.page_size, emit).await?
         };
-        Ok(Ran { row_count, cancelled, in_transaction: Some(inside) })
+        Ok(Ran { row_count, cancelled, in_transaction: Some(inside), has_more: false })
+    }
+
+    /// Declares the [`CURSOR`] for a paused read: in a read transaction of
+    /// the driver's own, or in a savepoint of the user's block. `false` when
+    /// the statement cannot back a cursor (`INSERT ... RETURNING`,
+    /// `EXPLAIN`, data-modifying `WITH`, ...), with every trace of the
+    /// attempt undone.
+    async fn open_cursor(&mut self, sql: &str, inside: bool) -> Result<bool, tokio_postgres::Error> {
+        let begin = if inside { format!("savepoint {CURSOR}") } else { "begin".to_owned() };
+        self.client.batch_execute(&begin).await?;
+        let declare = format!("declare {CURSOR} no scroll cursor for\n{sql}");
+        if self.client.batch_execute(&declare).await.is_err() {
+            let undo = if inside {
+                format!("rollback to savepoint {CURSOR}; release savepoint {CURSOR}")
+            } else {
+                "rollback".to_owned()
+            };
+            self.client.batch_execute(&undo).await?;
+            return Ok(false);
+        }
+        self.open = Some(OpenResult { in_user_transaction: inside, held: None, fetches: HashMap::new() });
+        Ok(true)
+    }
+
+    /// Reads from the open cursor; on any error, undoes the cursor (and the
+    /// driver's own read transaction) before reporting it, so a failed or
+    /// cancelled read never leaves the user's transaction aborted.
+    async fn pump_or_abort(
+        &mut self,
+        fetch: Fetch,
+        emit: &mut (dyn FnMut(QueryEvent) + Send),
+    ) -> Result<Pumped, tokio_postgres::Error> {
+        let outcome = self.pump(fetch, emit).await;
+        if outcome.is_err() {
+            self.abort_cursor().await;
+        }
+        outcome
+    }
+
+    /// Reads up to `fetch.limit` rows (all without one) from the open cursor.
+    /// Ends the cursor when the rows run out; keeps it open when the limit
+    /// or a cancel between batches stops the read.
+    async fn pump(&mut self, fetch: Fetch, emit: &mut (dyn FnMut(QueryEvent) + Send)) -> Result<Pumped, tokio_postgres::Error> {
+        let mut pager = Pager::new(fetch);
+        let held = self.open.as_mut().and_then(|open| open.held.take());
+        if let Some(row) = held {
+            match pager.push(row) {
+                Paged::Continue => {}
+                Paged::Page(rows) => emit(QueryEvent::Rows { rows }),
+                Paged::Overflow(row) => {
+                    self.hold(row);
+                    return Ok(Pumped { rows: 0, cancelled: false, has_more: true });
+                }
+            }
+        }
+        loop {
+            let wanted = pager.wanted();
+            let statement = self.fetch_statement(wanted).await?;
+            let batch = self.client.query(&statement, &[]).await?;
+            let exhausted = batch.len() < wanted;
+            // A batch never reaches past the one row that tells whether more
+            // follow, so an overflow can only be its last row.
+            for row in decode_rows(&batch) {
+                match pager.push(row) {
+                    Paged::Continue => {}
+                    Paged::Page(rows) => emit(QueryEvent::Rows { rows }),
+                    Paged::Overflow(row) => {
+                        flush(&mut pager, emit);
+                        self.hold(row);
+                        return Ok(Pumped { rows: pager.taken(), cancelled: false, has_more: true });
+                    }
+                }
+            }
+            if exhausted {
+                flush(&mut pager, emit);
+                self.finish_cursor().await?;
+                return Ok(Pumped { rows: pager.taken(), cancelled: false, has_more: false });
+            }
+            if self.cancel.requested.load(Ordering::SeqCst) {
+                flush(&mut pager, emit);
+                return Ok(Pumped { rows: pager.taken(), cancelled: true, has_more: true });
+            }
+        }
+    }
+
+    fn hold(&mut self, row: Row) {
+        if let Some(open) = self.open.as_mut() {
+            open.held = Some(row);
+        }
+    }
+
+    /// `FETCH FORWARD n` from the open cursor, prepared once per `n`: the
+    /// count must be a literal, and a prepared statement brings the typed
+    /// columns the decoder needs.
+    async fn fetch_statement(&mut self, n: usize) -> Result<Statement, tokio_postgres::Error> {
+        if let Some(statement) = self.open.as_ref().and_then(|open| open.fetches.get(&n)) {
+            return Ok(statement.clone());
+        }
+        let statement = self.client.prepare(&format!("fetch forward {n} from {CURSOR}")).await?;
+        if let Some(open) = self.open.as_mut() {
+            open.fetches.insert(n, statement.clone());
+        }
+        Ok(statement)
+    }
+
+    /// Ends the open cursor after its rows ran out.
+    async fn finish_cursor(&mut self) -> Result<(), tokio_postgres::Error> {
+        match self.open.take() {
+            Some(open) => self.end_cursor(&open).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Undoes the open cursor after a failed or cancelled read.
+    async fn abort_cursor(&mut self) {
+        if let Some(open) = self.open.take() {
+            self.undo_cursor(&open).await;
+        }
+    }
+
+    /// Releases the open result, if any (see [`Session::close_result`]).
+    async fn close_open(&mut self) {
+        let Some(open) = self.open.take() else { return };
+        if self.end_cursor(&open).await.is_err() {
+            self.undo_cursor(&open).await;
+        }
+    }
+
+    /// Closes the cursor and commits the driver's own read transaction (so
+    /// a read with side effects, like `nextval()`, keeps them as it would in
+    /// autocommit), or releases the savepoint in the user's block.
+    async fn end_cursor(&self, open: &OpenResult) -> Result<(), tokio_postgres::Error> {
+        let end = if open.in_user_transaction {
+            format!("close {CURSOR}; release savepoint {CURSOR}")
+        } else {
+            format!("close {CURSOR}; commit")
+        };
+        self.client.batch_execute(&end).await
+    }
+
+    /// Rolls back the driver's own read transaction, or the user's block to
+    /// the cursor's savepoint, which leaves the block itself open and usable.
+    async fn undo_cursor(&self, open: &OpenResult) {
+        if self.client.is_closed() {
+            return;
+        }
+        if open.in_user_transaction {
+            let undo = format!("rollback to savepoint {CURSOR}; release savepoint {CURSOR}");
+            let _ = self.client.batch_execute(&undo).await;
+        } else {
+            self.end_own_transaction().await;
+        }
     }
 
     /// Pages through a portal inside a transaction of the driver's own; only
@@ -425,14 +625,21 @@ fn reconnected_notice(lost_transaction: bool, schema: Option<&str>) -> String {
 }
 
 fn emit_page(rows: &[tokio_postgres::Row], emit: &mut (dyn FnMut(QueryEvent) + Send)) {
-    if rows.is_empty() {
-        return;
+    if !rows.is_empty() {
+        emit(QueryEvent::Rows { rows: decode_rows(rows) });
     }
-    let page: Vec<Row> = rows
-        .iter()
-        .map(|row| (0..row.len()).map(|i| row.get::<_, Cell>(i).0).collect())
-        .collect();
-    emit(QueryEvent::Rows { rows: page });
+}
+
+/// Emits the pager's last, partial page, if it has rows.
+fn flush(pager: &mut Pager, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+    let rows = pager.finish();
+    if !rows.is_empty() {
+        emit(QueryEvent::Rows { rows });
+    }
+}
+
+fn decode_rows(rows: &[tokio_postgres::Row]) -> Vec<Row> {
+    rows.iter().map(|row| (0..row.len()).map(|i| row.get::<_, Cell>(i).0).collect()).collect()
 }
 
 impl Session for PgSession {
@@ -446,7 +653,8 @@ impl Session for PgSession {
         &self.server
     }
 
-    async fn execute(&mut self, sql: &str, page_size: usize, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+    async fn execute(&mut self, sql: &str, fetch: Fetch, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+        self.close_open().await;
         // A statement never runs on a connection that replaced a lost one
         // without the user hearing about it: what was lost (an open
         // transaction, temporary tables, settings) could change its meaning.
@@ -463,7 +671,8 @@ impl Session for PgSession {
         let cancel = self.cancel.clone();
         cancel.begin();
         let started = Instant::now();
-        let outcome = self.run(sql, page_size.max(1), emit).await;
+        let fetch = Fetch { page_size: fetch.page_size.max(1), ..fetch };
+        let outcome = self.run(sql, fetch, emit).await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         cancel.end().await;
 
@@ -494,26 +703,83 @@ impl Session for PgSession {
                 row_count: ran.row_count,
                 elapsed_ms,
                 cancelled: ran.cancelled,
+                has_more: ran.has_more,
                 in_transaction,
             },
             Err(e) if e.code() == Some(&SqlState::QUERY_CANCELED) => {
-                QueryEvent::Done { row_count: 0, elapsed_ms, cancelled: true, in_transaction }
+                QueryEvent::Done { row_count: 0, elapsed_ms, cancelled: true, has_more: false, in_transaction }
             }
             Err(e) => QueryEvent::Error { message: format_error(&e), position: error_position(&e), in_transaction },
         });
     }
 
+    async fn fetch_more(&mut self, fetch: Fetch, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+        if self.open.is_none() {
+            emit(QueryEvent::Error {
+                message: NO_OPEN_RESULT.into(),
+                position: None,
+                in_transaction: self.in_transaction,
+            });
+            return;
+        }
+        if self.client.is_closed() {
+            let notice = self.recover().await;
+            emit(QueryEvent::Error { message: format!("{NO_OPEN_RESULT}\n{notice}"), position: None, in_transaction: false });
+            return;
+        }
+
+        let cancel = self.cancel.clone();
+        cancel.begin();
+        let started = Instant::now();
+        let fetch = Fetch { page_size: fetch.page_size.max(1), ..fetch };
+        let outcome = self.pump_or_abort(fetch, emit).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        cancel.end().await;
+
+        if self.client.is_closed() || outcome.as_ref().is_err_and(connection_lost) {
+            let notice = self.recover().await;
+            let cause = outcome.err().map(|e| format_error(&e)).unwrap_or_default();
+            emit(QueryEvent::Error { message: format!("{cause}\n{notice}"), position: None, in_transaction: false });
+            return;
+        }
+        // A read neither opens nor closes the user's transaction block, and a
+        // failed one is undone to its savepoint inside it.
+        let in_transaction = self.in_transaction;
+        emit(match outcome {
+            Ok(pumped) => QueryEvent::Done {
+                row_count: pumped.rows,
+                elapsed_ms,
+                cancelled: pumped.cancelled,
+                has_more: pumped.has_more,
+                in_transaction,
+            },
+            Err(e) if e.code() == Some(&SqlState::QUERY_CANCELED) => {
+                QueryEvent::Done { row_count: 0, elapsed_ms, cancelled: true, has_more: false, in_transaction }
+            }
+            Err(e) => QueryEvent::Error { message: format_error(&e), position: None, in_transaction },
+        });
+    }
+
+    async fn close_result(&mut self) {
+        self.close_open().await;
+    }
+
     async fn schemas(&mut self) -> Result<Vec<SchemaInfo>> {
+        self.close_open().await;
         self.ensure_connected().await?;
         introspect::schemas(&self.client).await.map_err(|e| Error::Query(format_error(&e)))
     }
 
     async fn introspect(&mut self, schema: &str) -> Result<SchemaModel> {
+        self.close_open().await;
         self.ensure_connected().await?;
         introspect::schema(&self.client, schema).await.map_err(|e| Error::Query(format_error(&e)))
     }
 
     async fn apply(&mut self, table: &TableRef, changes: &[RowChange]) -> Result<ApplyOutcome> {
+        // An open read's own transaction would take the changes in and look
+        // like the user's; close it so they commit on their own.
+        self.close_open().await;
         // Changes meant for a transaction the lost connection took along
         // must not be committed on their own on a fresh one.
         if self.client.is_closed() {
@@ -529,6 +795,7 @@ impl Session for PgSession {
     }
 
     async fn check(&mut self, sql: &str, schema: Option<&str>) -> Result<Option<SqlProblem>> {
+        self.close_open().await;
         self.ensure_connected().await?;
         let inside = self.transaction_open().await.map_err(|e| Error::Query(format_error(&e)))?;
         match self.prepare_only(sql, schema, inside).await {
@@ -558,6 +825,7 @@ impl Session for PgSession {
     /// the change is part of it (undone by a ROLLBACK), as a typed `SET`
     /// would be; it never begins or ends a transaction.
     async fn set_schema(&mut self, schema: &str) -> Result<()> {
+        self.close_open().await;
         self.ensure_connected().await?;
         let default = Some(schema) == self.server.default_schema.as_deref();
         let sql = if default { "reset search_path".to_owned() } else { format!("set search_path to {}", search_path(schema)) };

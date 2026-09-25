@@ -292,6 +292,49 @@ async fn respects_user_transactions() {
     testing::respects_user_transactions(&mut s, "main").await;
 }
 
+const TWENTY_THREE: &str = "with recursive s(n) as (select 1 union all select n + 1 from s where n < 23) select n from s";
+
+#[tokio::test]
+async fn fetches_on_demand() {
+    let (_dir, mut s) = session().await;
+    testing::fetches_on_demand(&mut s, TWENTY_THREE, 23).await;
+}
+
+#[tokio::test]
+async fn closes_open_results() {
+    let (_dir, mut s) = session().await;
+    testing::closes_open_results(&mut s, TWENTY_THREE).await;
+}
+
+#[tokio::test]
+async fn cancels_fetch_more() {
+    let (_dir, mut s) = session().await;
+    testing::cancels_fetch_more(
+        &mut s,
+        "with recursive s(n) as (select 1 union all select n + 1 from s where n < 10000000) select n from s",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn open_results_respect_user_transactions() {
+    let (_dir, mut s) = session().await;
+    testing::open_results_respect_user_transactions(&mut s, "main").await;
+}
+
+/// A paused read's worker holds the connection; introspection closes the
+/// read first instead of waiting for it forever.
+#[tokio::test]
+async fn introspection_closes_a_paused_read() {
+    let (_dir, mut s) = session().await;
+    run(&mut s, "create table t (id integer primary key)").await;
+    assert!(testing::done(&testing::collect_first(&mut s, TWENTY_THREE, 2, 10).await).1);
+    assert_eq!(s.introspect("main").await.expect("introspect").tables.len(), 1);
+    assert!(testing::done(&testing::collect_first(&mut s, TWENTY_THREE, 2, 10).await).1);
+    assert!(!s.schemas().await.expect("schemas").is_empty());
+    testing::assert_usable(&mut s).await;
+}
+
 #[tokio::test]
 async fn checks_without_running_anything() {
     let (_dir, mut s) = session().await;

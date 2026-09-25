@@ -284,6 +284,43 @@ async fn flags_generated_columns() {
 }
 
 #[tokio::test]
+async fn fetches_on_demand() {
+    let Some(mut s) = session().await else { return };
+    testing::fetches_on_demand(&mut s, "select g from generate_series(1, 23) g", 23).await;
+}
+
+#[tokio::test]
+async fn closes_open_results() {
+    let Some(mut s) = session().await else { return };
+    testing::closes_open_results(&mut s, "select g from generate_series(1, 10) g").await;
+}
+
+#[tokio::test]
+async fn cancels_fetch_more() {
+    let Some(mut s) = session().await else { return };
+    testing::cancels_fetch_more(&mut s, "select g from generate_series(1, 5000000) g").await;
+}
+
+#[tokio::test]
+async fn open_results_respect_user_transactions() {
+    let Some(mut s) = session().await else { return };
+    testing::open_results_respect_user_transactions(&mut s, "public").await;
+}
+
+/// A statement a cursor cannot hold is read whole even with a fetch limit,
+/// and its effects are committed as in autocommit.
+#[tokio::test]
+async fn reads_statements_a_cursor_cannot_hold_whole() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["drop table if exists idedb_returning", "create table idedb_returning (id int)"]).await;
+    let events = testing::collect_first(&mut s, "insert into idedb_returning select g from generate_series(1, 20) g returning id", 5, 100).await;
+    assert_eq!(rows(&events).len(), 20, "{events:?}");
+    assert_eq!(testing::done(&events), (20, false, false));
+    let count = collect(&mut s, "select count(*) from idedb_returning", 10).await;
+    assert_eq!(rows(&count), vec![vec![Value::Int(20)]], "{count:?}");
+}
+
+#[tokio::test]
 async fn respects_user_transactions() {
     let Some(mut s) = session().await else { return };
     testing::respects_user_transactions(&mut s, "public").await;

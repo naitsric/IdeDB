@@ -39,6 +39,8 @@ interface ResultGridProps {
   selection: GridSelection;
   onSelectionChange: (selection: GridSelection) => void;
   onCellContextMenu?: (cell: Item) => void;
+  /** Called with the last row in view whenever the view scrolls or resizes. */
+  onScrollRows?: (lastVisibleRow: number) => void;
 }
 
 const GRID_FONT = '12px "JetBrains Mono Variable"';
@@ -63,6 +65,7 @@ export function ResultGrid({
   selection,
   onSelectionChange,
   onCellContextMenu,
+  onScrollRows,
 }: ResultGridProps) {
   const resolvedTheme = useTheme((s) => s.resolved);
   const [fontsReady, setFontsReady] = useState(() => document.fonts.check(GRID_FONT));
@@ -166,6 +169,7 @@ export function ResultGrid({
       onPaste={editable}
       keybindings={KEYBINDINGS}
       onCellContextMenu={(cell) => onCellContextMenu?.(cell)}
+      onVisibleRegionChanged={onScrollRows && ((range) => onScrollRows(range.y + range.height - 1))}
       smoothScrollX
       smoothScrollY
       onColumnResize={(_, width, index) => setResized((r) => ({ ...r, [index]: width }))}

@@ -132,6 +132,16 @@ Every driver implements `idedb_core::Session` and runs the shared conformance
 checks in `idedb_core::testing` (paging, cancellation, errors, data editor
 changes, checking without running), so all engines behave the same behind the UI.
 
+Results load a page at a time, as in DataGrip: a statement reads its first
+page (500 rows by default; *Result Page Size…* changes it) and the rest stays
+open on the console's session. Scrolling near the end fetches the next page,
+*Fetch All Rows* the rest, and *Close Result Set* releases it. A session holds
+one open result; anything else it runs (another statement, a data editor
+submit, a schema switch) closes it first, and so does two minutes without
+reading, because an open result holds server resources (a snapshot and table
+locks in Postgres, a statement paused mid-send in MySQL, a shared lock on a
+SQLite file). The driver's own read transaction never shows as the user's.
+
 Live diagnostics come from the engine itself: shortly after typing stops, the
 statements on screen are prepared (never executed) on the data source's
 explorer session, so the editor flags exactly what the server would reject,

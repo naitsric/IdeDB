@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { api, errorMessage, type Column, type SessionId, type TableRef, type Value } from "./api";
 import { invalidateChecks } from "./checkRevisions";
 import { openSessionFor, useDataSources } from "./dataSources";
+import { moreAfter, useFetchSettings, type MoreRows } from "./fetching";
 import type { TableFilter } from "./sql";
 
 /**
@@ -23,6 +24,14 @@ export interface ResultMeta {
   columns: Column[];
   /** Rows received so far. Updated at most once per frame while streaming. */
   rowCount: number;
+  /** Rows past the loaded ones: none, open on the session, or released. */
+  more: MoreRows;
+  /** A fetch of the next page, or of all the rest, is running. */
+  fetching?: "page" | "all";
+  /** Why the last fetch failed, e.g. the rest was closed on the session. */
+  fetchError?: string;
+  /** How long the last fetch of more rows took. */
+  fetchMs?: number;
   /** Set for statements without a result set (DML, DDL). */
   affectedRows?: number;
   firstPageMs?: number;
@@ -87,6 +96,16 @@ interface ConsolesState {
   /** Switches the console's current schema; `undefined` goes back to the server default. */
   setSchema: (id: string, schema: string | undefined) => Promise<void>;
   cancel: (id: string) => Promise<void>;
+  /** Loads the next page of a result's open rest, or all of it. */
+  fetchMore: (id: string, resultId: number, all?: boolean) => Promise<void>;
+  /** Releases the console's open result without loading the rest. */
+  closeCursor: (id: string) => Promise<void>;
+  /**
+   * Call before the console's session does anything but read on (a data
+   * editor submit, a schema switch): the session closes its open result
+   * then, so the result stops offering more rows.
+   */
+  releaseOpenResults: (id: string) => void;
   selectResult: (id: string, resultId: number) => void;
   togglePin: (id: string, resultId: number) => void;
   closeResult: (id: string, resultId: number) => Promise<void>;
@@ -97,8 +116,9 @@ interface ConsolesState {
 export const activeResult = (entry: ConsoleState | undefined): ResultMeta | undefined =>
   entry?.results.find((r) => r.id === entry.activeResultId);
 
+/** Whether the console's session is busy: running a statement or fetching more rows. */
 export const isRunning = (entry: ConsoleState | undefined): boolean =>
-  !!entry?.results.some((r) => r.status === "running");
+  !!entry?.results.some((r) => r.status === "running" || r.fetching !== undefined);
 
 /** Where the console's unqualified names resolve: its chosen schema, else the server default. */
 export function effectiveSchema(entry: ConsoleState | undefined): string | null {
@@ -255,6 +275,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       status: "running",
       columns: [],
       rowCount: 0,
+      more: "none",
       table,
       version: 0,
     };
@@ -301,6 +322,8 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       const sessionId = await ensureSession(id);
       // Another run that shared the session open may have started meanwhile.
       if (sessionId === undefined || isRunning(get().consoles[id])) return undefined;
+      // Running anything closes the session's open result.
+      get().releaseOpenResults(id);
       const resultId = openResult(id, statement, options.newTab ?? false, options.table);
       if (resultId === undefined) return undefined;
 
@@ -313,7 +336,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       const update = (change: Partial<ResultMeta>) => patchResult(id, resultId, change);
 
       await api
-        .execute(sessionId, statement, (event) => {
+        .execute(sessionId, statement, useFetchSettings.getState().pageSize, (event) => {
           switch (event.kind) {
             case "columns":
               hasColumns = true;
@@ -336,6 +359,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
               update({
                 status: event.cancelled ? "cancelled" : "done",
                 rowCount: rows.length,
+                more: moreAfter(event),
                 affectedRows: hasColumns ? undefined : event.rowCount,
                 elapsedMs: event.elapsedMs,
               });
@@ -371,6 +395,69 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       await api.cancel(entry.sessionId);
     },
 
+    fetchMore: async (id, resultId, all = false) => {
+      const entry = get().consoles[id];
+      const result = entry?.results.find((r) => r.id === resultId);
+      const rows = rowBuffers.get(resultId);
+      const sessionId = entry?.sessionId;
+      if (!result || !rows || result.more !== "open" || isRunning(entry) || sessionId === undefined) return;
+
+      const startedAt = performance.now();
+      let frame = 0;
+      const update = (change: Partial<ResultMeta>) => patchResult(id, resultId, change);
+      update({ fetching: all ? "all" : "page", fetchError: undefined });
+      const pageSize = useFetchSettings.getState().pageSize;
+      await api
+        .fetchMore(sessionId, all ? null : pageSize, (event) => {
+          switch (event.kind) {
+            case "rows":
+              // Appended in place, like the first page: the grid reads rows by index.
+              for (const row of event.rows) rows.push(row);
+              if (!frame) {
+                frame = requestAnimationFrame(() => {
+                  frame = 0;
+                  update({ rowCount: rows.length });
+                });
+              }
+              break;
+            case "done":
+              cancelAnimationFrame(frame);
+              update({
+                fetching: undefined,
+                rowCount: rows.length,
+                more: moreAfter(event),
+                fetchMs: Math.round(performance.now() - startedAt),
+              });
+              patch(id, { inTransaction: event.inTransaction });
+              break;
+            case "error":
+              cancelAnimationFrame(frame);
+              update({ fetching: undefined, rowCount: rows.length, more: "closed", fetchError: event.message });
+              patch(id, { inTransaction: event.inTransaction });
+              break;
+            case "columns":
+              break;
+          }
+        })
+        .catch((e) => {
+          cancelAnimationFrame(frame);
+          update({ fetching: undefined, rowCount: rows.length, more: "closed", fetchError: errorMessage(e) });
+        });
+    },
+
+    closeCursor: async (id) => {
+      const entry = get().consoles[id];
+      if (entry?.sessionId === undefined || isRunning(entry) || !entry.results.some((r) => r.more === "open")) return;
+      get().releaseOpenResults(id);
+      await api.closeResult(entry.sessionId).catch(() => {});
+    },
+
+    releaseOpenResults: (id) => {
+      for (const result of get().consoles[id]?.results ?? []) {
+        if (result.more === "open") patchResult(id, result.id, { more: "closed" });
+      }
+    },
+
     mutateRows: (id, resultId, change) => {
       const rows = rowBuffers.get(resultId);
       const result = get().consoles[id]?.results.find((r) => r.id === resultId);
@@ -393,6 +480,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       // Without a session there is nothing to switch yet: the schema applies on connect.
       const target = schema ?? useDataSources.getState().explorers[entry.dataSourceId]?.server?.defaultSchema;
       if (entry.sessionId === undefined || !target) return;
+      get().releaseOpenResults(id);
       await api.setSchema(entry.sessionId, target).catch((e) => patch(id, { connectError: errorMessage(e) }));
     },
 
@@ -409,7 +497,10 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       if (!entry || index < 0) return;
       const pending = pendingChangesOf(resultId);
       if (pending > 0 && !(await confirmDiscard(pending))) return;
-      if (entry.results[index].status === "running") await get().cancel(id);
+      const closing = entry.results[index];
+      if (closing.status === "running" || closing.fetching) await get().cancel(id);
+      // Nobody will read the rest: release what the session holds for it.
+      else if (closing.more === "open") await get().closeCursor(id);
 
       const results = entry.results.filter((r) => r.id !== resultId);
       const activeResultId =

@@ -1,10 +1,11 @@
 import type { GridSelection, Item } from "@glideapps/glide-data-grid";
-import { CircleAlert, CircleCheck, CircleSlash, LoaderCircle } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { CircleAlert, CircleCheck, CircleSlash, LoaderCircle, X } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import type { Value } from "../db/api";
 import { useConsoles, type ResultMeta } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
+import { rowsLabel, shouldFetchMore, useFetchSettings } from "../db/fetching";
 import { ContextMenuRoot, ContextMenuTrigger } from "../ui/ContextMenu";
 import { formatDuration } from "../ui/format";
 import { editCell, visibleRowCount } from "./actions";
@@ -50,7 +51,7 @@ export const ResultView = memo(function ResultView({
   return (
     <div className="flex h-full flex-col bg-panel">
       {result?.table && <TableBar consoleId={consoleId} result={result} target={target} />}
-      <ResultStatus result={result} getRow={getRow} />
+      <ResultStatus consoleId={consoleId} result={result} getRow={getRow} />
       <div className="relative min-h-0 flex-1">
         {!result ? (
           <Empty>Run a statement to see results here.</Empty>
@@ -123,6 +124,27 @@ function ResultBody({
     [consoleId, resultId],
   );
 
+  // Scrolling near the last loaded row fetches the next page. The view is
+  // also re-checked when rows arrive: a page that fits on screen scrolls
+  // nothing, so it would never ask for the one after it.
+  const lastVisibleRow = useRef(0);
+  const submitting = useGrids((s) => !!s.submitting[resultId]);
+  const fetchIfNear = useCallback(() => {
+    const current = useConsoles.getState().consoles[consoleId]?.results.find((r) => r.id === resultId);
+    if (!current || submitting) return;
+    if (shouldFetchMore(lastVisibleRow.current, current.rowCount, current.more, current.fetching !== undefined)) {
+      void useConsoles.getState().fetchMore(consoleId, resultId);
+    }
+  }, [consoleId, resultId, submitting]);
+  const onScrollRows = useCallback(
+    (row: number) => {
+      lastVisibleRow.current = row;
+      fetchIfNear();
+    },
+    [fetchIfNear],
+  );
+  useEffect(fetchIfNear, [fetchIfNear, result.rowCount, result.more, result.fetching]);
+
   return (
     <Group orientation="horizontal" className="size-full">
       <Panel id="grid" minSize="30%">
@@ -141,6 +163,7 @@ function ResultBody({
                 selection={selection}
                 onSelectionChange={onSelectionChange}
                 onCellContextMenu={onCellContextMenu}
+                onScrollRows={result.more === "open" ? onScrollRows : undefined}
               />
             </div>
           </ContextMenuTrigger>
@@ -159,7 +182,15 @@ function ResultBody({
   );
 }
 
-function ResultStatus({ result, getRow }: { result?: ResultMeta; getRow: (index: number) => Value[] | undefined }) {
+function ResultStatus({
+  consoleId,
+  result,
+  getRow,
+}: {
+  consoleId: string;
+  result?: ResultMeta;
+  getRow: (index: number) => Value[] | undefined;
+}) {
   const resultId = result?.id ?? -1;
   const selection = useGrids((s) => s.selections[resultId]);
   const edits = useGrids((s) => s.edits[resultId]) ?? NO_EDITS;
@@ -196,9 +227,10 @@ function ResultStatus({ result, getRow }: { result?: ResultMeta; getRow: (index:
 
   const pending = changeCount(edits);
   const parts = [
-    result.columns.length > 0 && `${count.format(result.rowCount)} ${result.rowCount === 1 ? "row" : "rows"}`,
+    result.columns.length > 0 && rowsLabel(result.rowCount, result.more),
     result.firstPageMs !== undefined && `first page ${result.firstPageMs} ms`,
     result.elapsedMs !== undefined && formatDuration(result.elapsedMs),
+    result.fetchMs !== undefined && `last fetch ${formatDuration(result.fetchMs)}`,
     result.status === "cancelled" && "cancelled",
   ].filter(Boolean);
 
@@ -206,6 +238,7 @@ function ResultStatus({ result, getRow }: { result?: ResultMeta; getRow: (index:
     <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-3 text-[12px] text-muted">
       {icon}
       <span className="shrink-0 tabular-nums">{parts.join(" · ")}</span>
+      <MoreRowsActions consoleId={consoleId} result={result} />
       {pending > 0 && (
         <span className="shrink-0 rounded bg-accent-soft px-1.5 py-px text-[11px] text-accent">
           {pending} pending {pending === 1 ? "change" : "changes"}
@@ -224,6 +257,61 @@ function ResultStatus({ result, getRow }: { result?: ResultMeta; getRow: (index:
       {notice && !failure && <span className="truncate text-success">{notice}</span>}
       <span className="ml-auto truncate font-mono text-[11px] text-subtle">{result.sql.replace(/\s+/g, " ")}</span>
     </div>
+  );
+}
+
+/**
+ * What can be done about the rows not loaded yet: fetch the next page or all
+ * of them, release them, stop a fetch, or re-run once they are gone.
+ */
+function MoreRowsActions({ consoleId, result }: { consoleId: string; result: ResultMeta }) {
+  const pageSize = useFetchSettings((s) => s.pageSize);
+  const { fetchMore, closeCursor, cancel, runStatement } = useConsoles.getState();
+
+  if (result.fetching) {
+    return (
+      <span className="flex shrink-0 items-center gap-1.5 text-accent">
+        <LoaderCircle className="size-3.5 animate-spin" />
+        {result.fetching === "all" ? "Fetching all rows…" : "Fetching…"}
+        <LinkButton onClick={() => void cancel(consoleId)}>Cancel</LinkButton>
+      </span>
+    );
+  }
+  if (result.more === "open") {
+    return (
+      <span className="flex shrink-0 items-center gap-2">
+        <LinkButton onClick={() => void fetchMore(consoleId, result.id)}>Fetch next {count.format(pageSize)}</LinkButton>
+        <LinkButton onClick={() => void fetchMore(consoleId, result.id, true)}>Fetch all</LinkButton>
+        <button
+          type="button"
+          title="Close result set: release the rows not loaded"
+          aria-label="Close result set"
+          onClick={() => void closeCursor(consoleId)}
+          className="rounded p-0.5 text-subtle hover:bg-hover hover:text-fg"
+        >
+          <X className="size-3" />
+        </button>
+      </span>
+    );
+  }
+  if (result.more === "closed") {
+    return (
+      <span className="flex min-w-0 items-center gap-2 text-subtle">
+        <span className="truncate" title={result.fetchError}>
+          {result.fetchError ?? "More rows were not loaded"}
+        </span>
+        <LinkButton onClick={() => void runStatement(consoleId, result.sql, { table: result.table })}>Re-run</LinkButton>
+      </span>
+    );
+  }
+  return null;
+}
+
+function LinkButton({ onClick, children }: { onClick: () => void; children: ReactNode }) {
+  return (
+    <button type="button" onClick={onClick} className="shrink-0 text-accent hover:underline">
+      {children}
+    </button>
   );
 }
 

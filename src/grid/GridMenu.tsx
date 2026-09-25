@@ -26,6 +26,9 @@ export function GridMenu({ isTable, editable }: { isTable: boolean; editable: bo
         </>
       )}
       <ContextMenuSeparator />
+      <CommandItem id="results.fetchAll" />
+      <CommandItem id="results.closeResultSet" />
+      <ContextMenuSeparator />
       <CommandItem id="grid.exportCsv" />
       <CommandItem id="grid.exportJson" />
       <CommandItem id="grid.exportSql" />

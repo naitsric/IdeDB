@@ -34,7 +34,7 @@ import {
   typingInField,
 } from "../grid/actions";
 import { activeGrid, selectedRows, toggleValueViewer, useGrids } from "../grid/dataEditor";
-import { useTheme } from "../theme";
+import { useTheme, useTranslucentSidebar } from "../theme";
 import { closeActivePanel, hasActivePanel, useWorkbench } from "../workbench/bridge";
 import { restoreDefaultLayout, showExplorer, toggleExplorer } from "../workbench/Workbench";
 import { useHistoryPalette } from "./HistoryPalette";
@@ -436,6 +436,13 @@ export function registerAppCommands(): () => void {
       keywords: ["color scheme", "dark mode"],
       run: () => useTheme.getState().setPreference(preference),
     })),
+    {
+      id: "appearance.translucentSidebar",
+      title: "Toggle Translucent Sidebar",
+      category: "Appearance",
+      keywords: ["vibrancy", "transparency", "glass"],
+      run: () => useTranslucentSidebar.getState().toggle(),
+    },
   ];
 
   return registerCommands(commands);

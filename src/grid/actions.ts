@@ -2,7 +2,7 @@ import type { DataEditorRef, GridSelection } from "@glideapps/glide-data-grid";
 import { save } from "@tauri-apps/plugin-dialog";
 import { openTableData } from "../actions";
 import { api, errorMessage, type Value } from "../db/api";
-import { rowGetter, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
+import { effectiveSchema, rowGetter, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { quoteIdent, sqlLiteral } from "../db/sql";
 import {
@@ -44,8 +44,7 @@ export const filterInputs = new Map<string, HTMLInputElement>();
 
 function engineOf(entry: ConsoleState) {
   const source = useDataSources.getState().sources.find((s) => s.id === entry.dataSourceId);
-  const defaultSchema = useDataSources.getState().explorers[entry.dataSourceId]?.server?.defaultSchema ?? null;
-  return source ? { engine: source.params.engine, defaultSchema } : undefined;
+  return source ? { engine: source.params.engine, defaultSchema: effectiveSchema(entry) } : undefined;
 }
 
 /** Loaded rows plus rows added in the editor. */

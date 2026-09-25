@@ -1,7 +1,7 @@
 import { CompactSelection, type GridSelection, type Rectangle } from "@glideapps/glide-data-grid";
 import { create } from "zustand";
 import type { Engine, TableInfo, TableRef } from "../db/api";
-import { useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
+import { effectiveSchema, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { NO_EDITS, type PendingEdits } from "./edits";
 
@@ -133,7 +133,7 @@ export function editorTarget(entry: ConsoleState | undefined, result: ResultMeta
     table: result.table,
     info,
     engine: source.params.engine,
-    defaultSchema: explorer?.server?.defaultSchema ?? null,
+    defaultSchema: effectiveSchema(entry),
     columnNames,
     keyColumns: keys,
   };

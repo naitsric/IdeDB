@@ -18,56 +18,83 @@ export interface Statement {
 const isIdentChar = (c: string) => /[\p{L}\p{N}_$]/u.test(c);
 const isTagStart = (c: string) => /[\p{L}_]/u.test(c);
 
+/**
+ * What the lexer sees: `quoted` covers string literals and quoted
+ * identifiers, `dollar` Postgres dollar-quoted bodies, `code` one character
+ * of anything else.
+ */
+export type LexKind = "separator" | "space" | "comment" | "quoted" | "dollar" | "code";
+
+/** Walks `sql` once, reporting every lexical run in order. */
+export function scan(sql: string, engine: Engine, visit: (kind: LexKind, from: number, to: number) => void): void {
+  let i = 0;
+  while (i < sql.length) {
+    const start = i;
+    const c = sql[i];
+    const next = sql[i + 1];
+
+    if (c === ";") {
+      visit("separator", start, ++i);
+    } else if (/\s/.test(c)) {
+      visit("space", start, ++i);
+    } else if ((c === "-" && next === "-") || (c === "#" && engine === "mysql")) {
+      const end = sql.indexOf("\n", i);
+      i = end < 0 ? sql.length : end + 1;
+      visit("comment", start, i);
+    } else if (c === "/" && next === "*") {
+      i = skipBlockComment(sql, i, engine === "postgres");
+      visit("comment", start, i);
+    } else if (c === "'" || c === '"' || (c === "`" && engine === "mysql")) {
+      i = skipQuoted(sql, i, c, backslashEscapes(sql, i, c, engine));
+      visit("quoted", start, i);
+    } else if (c === "$" && engine === "postgres" && !(i > 0 && isIdentChar(sql[i - 1]))) {
+      const tag = dollarTag(sql, i);
+      if (tag) {
+        const close = sql.indexOf(tag, i + tag.length);
+        i = close < 0 ? sql.length : close + tag.length;
+        visit("dollar", start, i);
+      } else {
+        visit("code", start, ++i);
+      }
+    } else {
+      visit("code", start, ++i);
+    }
+  }
+}
+
 export function splitStatements(sql: string, engine: Engine = "postgres"): Statement[] {
   const statements: Statement[] = [];
   // First and last+1 offsets of code (anything but whitespace and comments) in the current statement.
   let codeFrom = -1;
   let codeTo = -1;
-  const markCode = (from: number, to: number) => {
-    if (codeFrom < 0) codeFrom = from;
-    codeTo = to;
-  };
   const endStatement = () => {
     if (codeFrom >= 0) statements.push({ text: sql.slice(codeFrom, codeTo), from: codeFrom, to: codeTo });
     codeFrom = codeTo = -1;
   };
 
-  let i = 0;
-  while (i < sql.length) {
-    const c = sql[i];
-    const next = sql[i + 1];
-
-    if (c === ";") {
+  scan(sql, engine, (kind, from, to) => {
+    if (kind === "separator") {
       endStatement();
-      i++;
-    } else if (/\s/.test(c)) {
-      i++;
-    } else if ((c === "-" && next === "-") || (c === "#" && engine === "mysql")) {
-      const end = sql.indexOf("\n", i);
-      i = end < 0 ? sql.length : end + 1;
-    } else if (c === "/" && next === "*") {
-      i = skipBlockComment(sql, i, engine === "postgres");
-    } else if (c === "'" || c === '"' || (c === "`" && engine === "mysql")) {
-      const start = i;
-      i = skipQuoted(sql, i, c, backslashEscapes(sql, i, c, engine));
-      markCode(start, i);
-    } else if (c === "$" && engine === "postgres" && !(i > 0 && isIdentChar(sql[i - 1]))) {
-      const start = i;
-      const tag = dollarTag(sql, i);
-      if (tag) {
-        const close = sql.indexOf(tag, i + tag.length);
-        i = close < 0 ? sql.length : close + tag.length;
-      } else {
-        i++;
-      }
-      markCode(start, i);
-    } else {
-      markCode(i, i + 1);
-      i++;
+    } else if (kind !== "space" && kind !== "comment") {
+      if (codeFrom < 0) codeFrom = from;
+      codeTo = to;
     }
-  }
+  });
   endStatement();
   return statements;
+}
+
+/**
+ * `sql` with comments, strings, quoted identifiers and dollar-quoted bodies
+ * blanked out (same length, newlines kept), for pattern matching on code only.
+ */
+export function maskNonCode(sql: string, engine: Engine): string {
+  let out = "";
+  scan(sql, engine, (kind, from, to) => {
+    const text = sql.slice(from, to);
+    out += kind === "comment" || kind === "quoted" || kind === "dollar" ? text.replace(/[^\n]/g, " ") : text;
+  });
+  return out;
 }
 
 /**

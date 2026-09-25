@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { history, undo } from "@codemirror/commands";
 import { forEachDiagnostic, type Diagnostic } from "@codemirror/lint";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -13,7 +14,7 @@ function setup(doc: string, selection?: { anchor: number; head?: number }) {
   const statements = statementsField("postgres");
   view = new EditorView({
     parent: document.body,
-    state: EditorState.create({ doc, selection, extensions: [statements, flashField] }),
+    state: EditorState.create({ doc, selection, extensions: [statements, flashField, history()] }),
   });
   return { view, api: editorApi(view, "postgres", statements) };
 }
@@ -57,6 +58,25 @@ describe("insertAtCaret", () => {
     const { view: v, api } = setup("select 1\n   \nselect 3", { anchor: 10 });
     api.insertAtCaret("select 2");
     expect(v.state.doc.toString()).toBe("select 1\nselect 2\nselect 3");
+  });
+});
+
+describe("reformat", () => {
+  it("formats only the statement under the caret, as one undo step", () => {
+    const doc = "select 1;\nselect a,b from t where a=1;\nselect 3";
+    const { view: v, api } = setup(doc, { anchor: doc.indexOf("a,b") });
+    expect(api.reformat()).toBe(true);
+    expect(v.state.doc.toString()).toBe("select 1;\nselect\n  a,\n  b\nfrom\n  t\nwhere\n  a = 1;\nselect 3");
+    undo(v);
+    expect(v.state.doc.toString()).toBe(doc);
+  });
+
+  it("formats the selection and keeps it selected", () => {
+    const doc = "select 1; select 2";
+    const { view: v, api } = setup(doc, { anchor: 0, head: doc.length });
+    api.reformat();
+    expect(v.state.doc.toString()).toBe("select\n  1;\n\nselect\n  2");
+    expect(v.state.sliceDoc(v.state.selection.main.from, v.state.selection.main.to)).toBe(v.state.doc.toString());
   });
 });
 

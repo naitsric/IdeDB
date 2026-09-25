@@ -6,12 +6,14 @@ import { executeCommand } from "../../commands/registry";
 import { activeResult, isRunning, rowGetter, useConsoles } from "../../db/consoles";
 import { useDataSources } from "../../db/dataSources";
 import { catalogFor } from "../../editor/catalog";
+import { lintBackendFor, useLintContext } from "../../editor/lintBackend";
 import { editorFor } from "../../editor/registry";
 import { SqlEditor } from "../../editor/SqlEditor";
 import { ResultView } from "../../grid/ResultView";
 import { EngineIcon } from "../../ui/EngineIcon";
 import { IconButton, Kbd, StatusDot } from "../../ui/primitives";
 import { ResultTabs } from "./ResultTabs";
+import { SchemaSelector } from "./SchemaSelector";
 
 const noRows = () => undefined;
 
@@ -24,9 +26,14 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
   const dataSourceId = entry?.dataSourceId;
   const engine = source?.params.engine;
   const catalog = useMemo(
-    () => (dataSourceId && engine ? catalogFor(dataSourceId, engine) : undefined),
-    [dataSourceId, engine],
+    () => (dataSourceId && engine ? catalogFor(consoleId, dataSourceId, engine) : undefined),
+    [consoleId, dataSourceId, engine],
   );
+  const lint = useMemo(() => lintBackendFor(consoleId), [consoleId]);
+
+  // Recheck the statements on screen when what checks run against changes.
+  const lintContext = useLintContext(consoleId);
+  useEffect(() => editorFor(consoleId)?.refreshDiagnostics(), [consoleId, lintContext]);
 
   const title = entry?.table?.name ?? source?.name ?? "console";
   useEffect(() => api.setTitle(title), [api, title]);
@@ -78,6 +85,7 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
           <span className="truncate">{source.name}</span>
           <StatusDot tone={sessionTone} />
         </div>
+        <SchemaSelector consoleId={consoleId} />
         {entry.connectError && (
           <span className="selectable ml-2 truncate text-[12px] text-danger" title={entry.connectError}>
             {entry.connectError}
@@ -96,6 +104,7 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
             initialValue={entry.sql}
             onChange={(sql) => setSql(consoleId, sql)}
             catalog={catalog!}
+            lint={lint}
           />
         </Panel>
         <Separator className="h-px bg-border transition-colors data-[separator=active]:bg-accent data-[separator=hover]:bg-accent" />

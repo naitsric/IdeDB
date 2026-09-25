@@ -5,7 +5,7 @@ import { create } from "zustand";
  * places (⌘⏎ runs a statement in the editor but submits edits in the grid).
  * Marked in the DOM with `data-focus-context`.
  */
-export type FocusContext = "grid";
+export type FocusContext = "grid" | "editor";
 
 /**
  * Every user-facing action is a registered command, like IntelliJ's

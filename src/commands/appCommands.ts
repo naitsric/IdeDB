@@ -2,12 +2,15 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import {
   contextDataSourceId,
   createDataSource,
+  declarationUnderCaret,
   editDataSource,
   newConsole,
   openTableData,
   runStatements,
   statementsToRun,
 } from "../actions";
+import { editorFor } from "../editor/registry";
+import { revealInExplorer } from "../explorer/reveal";
 import { isRunning, useConsoles } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { qualifiedName, quoteIdent } from "../db/sql";
@@ -33,7 +36,7 @@ import {
 import { activeGrid, selectedRows, toggleValueViewer, useGrids } from "../grid/dataEditor";
 import { useTheme } from "../theme";
 import { useWorkbench } from "../workbench/bridge";
-import { restoreDefaultLayout, toggleExplorer } from "../workbench/Workbench";
+import { restoreDefaultLayout, showExplorer, toggleExplorer } from "../workbench/Workbench";
 import { useHistoryPalette } from "./HistoryPalette";
 import { registerCommands, type Command } from "./registry";
 import { useSearchEverywhere } from "./SearchEverywhere";
@@ -45,6 +48,10 @@ const activeConsole = () => {
   return id ? useConsoles.getState().consoles[id] : undefined;
 };
 const isConnected = (id: string | undefined) => !!id && sources().explorers[id]?.status === "connected";
+const hasActiveEditor = () => {
+  const entry = activeConsole();
+  return !!entry && !!editorFor(entry.id);
+};
 const hasGridSelection = () => {
   const grid = activeGrid();
   const selection = grid && useGrids.getState().selections[grid.result.id];
@@ -208,6 +215,35 @@ export function registerAppCommands(): () => void {
       },
     },
 
+    {
+      id: "editor.gotoDeclaration",
+      title: "Go to Declaration",
+      category: "Navigate",
+      keybinding: "$mod+KeyB",
+      context: "editor",
+      keywords: ["navigate", "explorer", "table", "column"],
+      enabled: hasActiveEditor,
+      run: async () => {
+        const entry = activeConsole();
+        const target = entry && (await declarationUnderCaret(entry.id));
+        if (!target) return;
+        showExplorer();
+        revealInExplorer(target);
+      },
+    },
+    {
+      id: "editor.reformat",
+      title: "Reformat Code",
+      category: "Console",
+      keybinding: "$mod+Alt+KeyL",
+      context: "editor",
+      keywords: ["format", "pretty", "beautify", "indent"],
+      enabled: hasActiveEditor,
+      run: () => {
+        const entry = activeConsole();
+        if (entry) editorFor(entry.id)?.reformat();
+      },
+    },
     {
       id: "console.history",
       title: "Query History",

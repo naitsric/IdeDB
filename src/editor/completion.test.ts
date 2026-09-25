@@ -3,7 +3,7 @@ import { EditorState } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
 import type { ColumnInfo, Engine, SchemaInfo, TableInfo } from "../db/api";
 import type { SchemaLoad } from "../db/dataSources";
-import { analyze, sqlLanguageSupport, type CompletionCatalog } from "./completion";
+import { aliasFor, analyze, sqlLanguageSupport, type CompletionCatalog } from "./completion";
 
 const column = (name: string, typeName = "int4", primaryKey: number | null = null): ColumnInfo => ({
   name,
@@ -193,11 +193,101 @@ describe("analyze", () => {
   });
 
   it("collects qualifiers and statement tables with aliases", () => {
-    const result = at("select o.| from shop.orders o join customers as c on c.id = o.customer_id");
+    const doc = "select o.| from shop.orders o join customers as c on c.id = o.customer_id";
+    const result = at(doc);
+    const text = doc.replace("|", "");
     expect(result.parents).toEqual(["o"]);
     expect(result.refs).toEqual([
-      { path: ["shop", "orders"], alias: "o" },
-      { path: ["customers"], alias: "c" },
+      { path: ["shop", "orders"], alias: "o", from: text.indexOf("shop.orders") },
+      { path: ["customers"], alias: "c", from: text.indexOf("customers") },
     ]);
+  });
+
+  it("knows the clause keyword and a spot right after ON", () => {
+    expect(at("select * from a join |").clause).toBe("join");
+    expect(at("select * from |").clause).toBe("from");
+    expect(at("select * from a join b on |").afterOn).toBe(true);
+    expect(at("select * from a join b on b.|").afterOn).toBe(false);
+  });
+});
+
+describe("join completion", () => {
+  const fk = (columns: string[], referencedTable: string, referencedColumns: string[], referencedSchema = "shop") => ({
+    name: `fk_${columns.join("_")}`,
+    columns,
+    referencedSchema,
+    referencedTable,
+    referencedColumns,
+  });
+  const withKeys = (t: TableInfo, foreignKeys: TableInfo["foreignKeys"]) => ({ ...t, foreignKeys });
+
+  /** shop: orders → customers; order_items → orders (composite key) and → products. */
+  function joinCatalog() {
+    const models: Record<string, SchemaLoad> = {
+      public: { state: "loaded", model: { tables: [] } },
+      shop: {
+        state: "loaded",
+        model: {
+          tables: [
+            table("customers", [column("id", "int8", 1), column("email", "text")]),
+            withKeys(table("orders", [column("tenant", "int4", 1), column("id", "int8", 2), column("customer_id", "int8")]), [
+              fk(["customer_id"], "customers", ["id"]),
+            ]),
+            withKeys(
+              table("order_items", [column("tenant"), column("order_id", "int8"), column("sku", "text")]),
+              [fk(["tenant", "order_id"], "orders", ["tenant", "id"]), fk(["sku"], "products", ["sku"])],
+            ),
+            table("products", [column("sku", "text", 1)]),
+          ],
+        },
+      },
+    };
+    const catalog: CompletionCatalog = {
+      snapshot: () => ({ engine: "postgres", defaultSchema: "shop", schemas: SCHEMAS, showSystemSchemas: false, models }),
+      loadSchema: async () => {},
+    };
+    return catalog;
+  }
+
+  it("suggests tables linked by foreign keys, both directions, as full join snippets", async () => {
+    const options = await complete("select * from orders o join |", joinCatalog(), { explicit: false });
+    const joins = options.filter((o) => o.type === "join");
+    expect(joins.map((o) => o.apply)).toEqual([
+      "customers c on c.id = o.customer_id",
+      "order_items oi on oi.tenant = o.tenant and oi.order_id = o.id",
+    ]);
+    // Joins rank above plain tables.
+    expect(options[0].type).toBe("join");
+  });
+
+  it("narrows join snippets while typing the table name, and keeps aliases unique", async () => {
+    const options = await complete("select * from order_items oi join or|", joinCatalog());
+    expect(options.filter((o) => o.type === "join").map((o) => o.apply)).toEqual([
+      "orders o on o.tenant = oi.tenant and o.id = oi.order_id",
+    ]);
+    const taken = await complete("select * from orders c join cu|", joinCatalog());
+    expect(taken.find((o) => o.type === "join")?.apply).toBe("customers c1 on c1.id = c.customer_id");
+  });
+
+  it("qualifies joined tables outside the default schema", async () => {
+    const catalog = joinCatalog();
+    const snapshot = catalog.snapshot()!;
+    const other: CompletionCatalog = { ...catalog, snapshot: () => ({ ...snapshot, defaultSchema: "public" }) };
+    const options = await complete("select * from shop.orders o join cu|", other);
+    expect(options.find((o) => o.type === "join")?.apply).toBe("shop.customers c on c.id = o.customer_id");
+  });
+
+  it("suggests the foreign key condition right after ON", async () => {
+    const options = await complete("select * from orders o join order_items i on |", joinCatalog());
+    expect(options.map((o) => o.label)).toEqual(["i.tenant = o.tenant and i.order_id = o.id"]);
+    const reversed = await complete("select * from order_items i join orders o on |", joinCatalog());
+    expect(reversed.map((o) => o.label)).toEqual(["o.tenant = i.tenant and o.id = i.order_id"]);
+  });
+
+  it("makes aliases from word initials, skipping reserved words and taken names", () => {
+    expect(aliasFor("order_items", new Set())).toBe("oi");
+    expect(aliasFor("orderItems", new Set())).toBe("oi");
+    expect(aliasFor("order_rules", new Set())).toBe("or1");
+    expect(aliasFor("customers", new Set(["c", "c1"]))).toBe("c2");
   });
 });

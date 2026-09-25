@@ -59,7 +59,8 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
     setSaving(true);
     setSaveError(undefined);
     try {
-      await save(withDefaultName(source), passwordToSave(isNew, source.savePassword, password));
+      // SQLite files have no password: nothing to keep in the Keychain.
+      await save(withDefaultName(source), isFile ? undefined : passwordToSave(isNew, source.savePassword, password));
       onClose();
     } catch (err) {
       setSaveError(errorMessage(err));

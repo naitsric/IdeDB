@@ -88,6 +88,15 @@ jobs:
       - uses: pnpm/action-setup@v6
         with:
           version: 11
+      # Service containers start empty; load the same seeds docker-compose
+      # mounts locally, so tests that rely on the sample `shop` data behave
+      # the same in CI.
+      - name: Seed databases
+        run: |
+          docker exec -i ${{ job.services.postgres.id }} \
+            psql -q -v ON_ERROR_STOP=1 -U idedb -d idedb < dev/seed/postgres.sql
+          docker exec -i ${{ job.services.mysql.id }} \
+            mysql -uroot -pidedb < dev/seed/mysql.sql
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests

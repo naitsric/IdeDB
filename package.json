@@ -13,7 +13,8 @@
     "db:down": "docker compose down",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:rust": "IDEDB_PG_URL=postgres://idedb:idedb@localhost:54329/idedb IDEDB_MYSQL_URL=mysql://idedb:idedb@localhost:33069/idedb cargo test --workspace"
+    "test:rust": "IDEDB_PG_URL=postgres://idedb:idedb@localhost:54329/idedb IDEDB_MYSQL_URL=mysql://idedb:idedb@localhost:33069/idedb cargo test --workspace",
+    "icon": "node scripts/render-icon.mjs && tauri icon design/icon.png && rm -rf src-tauri/icons/android src-tauri/icons/ios src-tauri/icons/64x64.png"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
@@ -48,6 +49,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2",
     "@types/node": "^26.6.2",

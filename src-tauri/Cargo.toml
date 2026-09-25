@@ -21,8 +21,11 @@ idedb-driver-sqlite.workspace = true
 idedb-store.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true
-tauri = { version = "2", features = [] }
+# macos-private-api: transparent window for the translucent sidebar (not
+# Mac App Store compatible; IdeDB ships through GitHub releases).
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
 tokio.workspace = true
 
 [dev-dependencies]

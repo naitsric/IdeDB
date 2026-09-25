@@ -8,7 +8,7 @@ export function ExplorerPanel() {
   const { sources, loaded } = useDataSources();
 
   return (
-    <div className="flex h-full flex-col bg-panel">
+    <div className="explorer-panel flex h-full flex-col bg-sidebar">
       <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-border px-1.5">
         <IconButton label="New Data Source" shortcut="$mod+KeyN" onClick={() => executeCommand("datasource.new")}>
           <Plus className="size-4" />

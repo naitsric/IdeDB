@@ -2,6 +2,7 @@ mod data_sources;
 mod drivers;
 mod error;
 mod export;
+mod menu;
 mod sessions;
 
 use idedb_store::{SecretStore, Store};
@@ -26,6 +27,9 @@ fn secret_store(_app: &tauri::App) -> Box<dyn SecretStore> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Reopens the window at its last size and position.
+        .plugin(tauri_plugin_window_state::Builder::new().build())
+        .on_menu_event(menu::on_menu_event)
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -53,6 +57,7 @@ pub fn run() {
             export::export_begin,
             export::export_write,
             export::export_finish,
+            menu::menu_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

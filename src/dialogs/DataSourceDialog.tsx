@@ -6,7 +6,7 @@ import { useDataSources } from "../db/dataSources";
 import { EngineIcon, ENGINE_LABEL } from "../ui/EngineIcon";
 import { Field, inputClass, Modal } from "../ui/Modal";
 import { Button, cx } from "../ui/primitives";
-import { useDialogs } from "./dialogs";
+import { passwordToSave, useDialogs } from "./dialogs";
 
 const DEFAULT_PORT: Record<Engine, number | null> = { postgres: 5432, mysql: 3306, sqlite: null };
 
@@ -59,7 +59,7 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
     setSaving(true);
     setSaveError(undefined);
     try {
-      await save(withDefaultName(source), source.savePassword ? password : undefined);
+      await save(withDefaultName(source), passwordToSave(isNew, source.savePassword, password));
       onClose();
     } catch (err) {
       setSaveError(errorMessage(err));

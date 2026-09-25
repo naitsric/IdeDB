@@ -32,6 +32,17 @@ export function requestPassword(source: DataSource): Promise<string | null> {
   });
 }
 
+/**
+ * What to send as the password when saving a data source: `undefined`
+ * keeps the stored one. A new data source that saves its password stores
+ * what was typed, even nothing (a passwordless server); otherwise it would
+ * have no Keychain entry and every connect would ask.
+ */
+export function passwordToSave(isNew: boolean, savePassword: boolean, typed: string | undefined): string | undefined {
+  if (!savePassword) return undefined;
+  return isNew ? (typed ?? "") : typed;
+}
+
 export function newDataSource(): DataSource {
   return {
     id: "",

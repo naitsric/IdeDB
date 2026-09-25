@@ -162,6 +162,9 @@ function persist(consoles: Record<string, ConsoleState>) {
 
 let nextResultId = 0;
 
+/** Session opens in flight, by console. */
+const sessionOpens = new Map<string, Promise<SessionId | undefined>>();
+
 /**
  * Counts a result's data editor changes not yet submitted. The grid module
  * installs it (it depends on this one, not the other way around).
@@ -200,22 +203,37 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       return { consoles: { ...s.consoles, [id]: { ...entry, results } } };
     });
 
-  async function ensureSession(id: string): Promise<SessionId | undefined> {
+  /** The console's session, opening it on first use. Runs started while it opens share the one open. */
+  function ensureSession(id: string): Promise<SessionId | undefined> {
     const entry = get().consoles[id];
-    if (!entry) return undefined;
-    if (entry.sessionId !== undefined) return entry.sessionId;
+    if (!entry) return Promise.resolve(undefined);
+    if (entry.sessionId !== undefined) return Promise.resolve(entry.sessionId);
+    let pending = sessionOpens.get(id);
+    if (!pending) {
+      pending = openSession(id, entry.dataSourceId).finally(() => sessionOpens.delete(id));
+      sessionOpens.set(id, pending);
+    }
+    return pending;
+  }
 
+  async function openSession(id: string, dataSourceId: string): Promise<SessionId | undefined> {
     patch(id, { connecting: true, connectError: undefined });
     try {
-      const opened = await openSessionFor(entry.dataSourceId);
+      const opened = await openSessionFor(dataSourceId);
+      // Nobody to hand it to: the console was closed or its data source deleted meanwhile.
+      const gone = !get().consoles[id] || !useDataSources.getState().sources.some((s) => s.id === dataSourceId);
+      if (opened && gone) {
+        await api.closeSession(opened.id).catch(() => {});
+        return undefined;
+      }
       // A new session starts on the server default: re-apply the console's schema.
       const schema = get().consoles[id]?.schema;
       if (opened && schema) {
         await api.setSchema(opened.id, schema).catch((e) => patch(id, { connectError: errorMessage(e) }));
       }
-      patch(id, { connecting: false, sessionId: opened?.id });
+      patch(id, { connecting: false, sessionId: opened?.id, inTransaction: false });
       // Connecting a console also connects the explorer, as DataGrip does.
-      if (opened) void useDataSources.getState().connect(entry.dataSourceId);
+      if (opened) void useDataSources.getState().connect(dataSourceId);
       return opened?.id;
     } catch (e) {
       patch(id, { connecting: false, connectError: errorMessage(e) });
@@ -281,7 +299,8 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       if (!options.confirmed && !(await get().confirmReplace(id, options))) return undefined;
 
       const sessionId = await ensureSession(id);
-      if (sessionId === undefined) return undefined;
+      // Another run that shared the session open may have started meanwhile.
+      if (sessionId === undefined || isRunning(get().consoles[id])) return undefined;
       const resultId = openResult(id, statement, options.newTab ?? false, options.table);
       if (resultId === undefined) return undefined;
 

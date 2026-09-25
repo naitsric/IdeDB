@@ -23,11 +23,15 @@ vi.mock("./api", async (importOriginal) => ({
 const ask = vi.fn(async () => true);
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask }));
 
+const server = { engine: "postgres", version: "17", defaultSchema: "public" };
+const openSessionFor = vi.fn(async (): Promise<{ id: number; server: typeof server } | null> => ({ id: 7, server }));
+const sources = [{ id: "ds-1" }];
 vi.mock("./dataSources", () => ({
-  openSessionFor: vi.fn(async () => ({ id: 7, server: { engine: "postgres", version: "17", defaultSchema: "public" } })),
-  useDataSources: { getState: () => ({ connect: vi.fn() }) },
+  openSessionFor,
+  useDataSources: { getState: () => ({ connect: vi.fn(), sources, explorers: {} }) },
 }));
 
+const { api } = await import("./api");
 const { activeResult, rowGetter, setPendingChangesProbe, useConsoles } = await import("./consoles");
 
 const rows = (sql: string, values: number[]) =>
@@ -46,6 +50,44 @@ beforeEach(() => {
   ask.mockClear();
   setPendingChangesProbe(() => 0);
   consoleId = useConsoles.getState().create("ds-1");
+});
+
+describe("opening the console's session", () => {
+  it("opens one session for runs started while it connects, and runs only one of them", async () => {
+    let resolve!: (opened: { id: number; server: typeof server }) => void;
+    openSessionFor.mockClear();
+    openSessionFor.mockImplementationOnce(() => new Promise((r) => (resolve = r)));
+    vi.mocked(api.execute).mockClear();
+    // A real statement streams for a while; the second run must not replace it.
+    vi.mocked(api.execute).mockImplementationOnce(async (_id, _sql, onEvent) => {
+      await new Promise((r) => setTimeout(r, 0));
+      onEvent({ kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false, inTransaction: false });
+    });
+    const { runStatement } = useConsoles.getState();
+
+    const first = runStatement(consoleId, "select 1");
+    const second = runStatement(consoleId, "select 2");
+    await Promise.resolve();
+    resolve({ id: 9, server });
+    const results = await Promise.all([first, second]);
+
+    expect(openSessionFor).toHaveBeenCalledTimes(1);
+    expect(api.execute).toHaveBeenCalledTimes(1);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(entry().sessionId).toBe(9);
+  });
+
+  it("closes a session that finishes opening after its console was closed", async () => {
+    let resolve!: (opened: { id: number; server: typeof server }) => void;
+    openSessionFor.mockImplementationOnce(() => new Promise((r) => (resolve = r)));
+    vi.mocked(api.closeSession).mockClear();
+    const run = useConsoles.getState().runStatement(consoleId, "select 1");
+    await Promise.resolve();
+    await useConsoles.getState().remove(consoleId);
+    resolve({ id: 11, server });
+    expect(await run).toBeUndefined();
+    expect(api.closeSession).toHaveBeenCalledWith(11);
+  });
 });
 
 describe("pending data editor changes", () => {

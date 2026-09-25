@@ -175,6 +175,32 @@ export function setPendingChangesProbe(probe: (resultId: number) => number) {
   pendingChangesOf = probe;
 }
 
+/**
+ * Hooks around every statement a console runs, installed by transactions.ts
+ * (manual transaction mode). Kept as a seam so this module does not depend
+ * on it.
+ */
+export interface ExecutionHooks {
+  /**
+   * Runs on the session right before `sql`, e.g. to open a transaction.
+   * Resolves to an error message to fail the run instead of executing it.
+   * `tableLoad`: the data editor loading a table, not the user's SQL.
+   */
+  before: (consoleId: string, sessionId: SessionId, sql: string, tableLoad: boolean) => Promise<string | undefined>;
+  /** After `sql` ended, with whether a user transaction was open around it. */
+  after: (
+    consoleId: string,
+    sql: string,
+    outcome: { wasOpen: boolean; nowOpen: boolean; error?: string; sessionLost: boolean },
+  ) => void;
+}
+
+let executionHooks: ExecutionHooks = { before: async () => undefined, after: () => {} };
+
+export function setExecutionHooks(hooks: ExecutionHooks) {
+  executionHooks = hooks;
+}
+
 /** The one place that asks before unsubmitted changes are thrown away. */
 async function confirmDiscard(count: number): Promise<boolean> {
   return ask("They have not been submitted and will be lost.", {
@@ -304,6 +330,14 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       const resultId = openResult(id, statement, options.newTab ?? false, options.table);
       if (resultId === undefined) return undefined;
 
+      const refused = await executionHooks.before(id, sessionId, statement, options.table !== undefined);
+      if (refused) {
+        patchResult(id, resultId, { status: "error", error: refused });
+        return get().consoles[id]?.results.find((r) => r.id === resultId);
+      }
+      const wasOpen = get().consoles[id]?.inTransaction ?? false;
+      let sessionLost = false;
+
       const startedAt = performance.now();
       const rows: Value[][] = [];
       rowBuffers.set(resultId, rows);
@@ -355,6 +389,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
         })
         .catch((e) => {
           // The session is gone (for example, its data source was disconnected).
+          sessionLost = true;
           update({ status: "error", error: errorMessage(e) });
           patch(id, { sessionId: undefined, inTransaction: false });
         });
@@ -362,7 +397,14 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       const dataSourceId = get().consoles[id]?.dataSourceId;
       if (dataSourceId) invalidateChecks(dataSourceId);
 
-      return get().consoles[id]?.results.find((r) => r.id === resultId);
+      const finished = get().consoles[id]?.results.find((r) => r.id === resultId);
+      executionHooks.after(id, statement, {
+        wasOpen,
+        nowOpen: get().consoles[id]?.inTransaction ?? false,
+        error: finished?.status === "error" ? finished.error : undefined,
+        sessionLost,
+      });
+      return finished;
     },
 
     cancel: async (id) => {

@@ -4,6 +4,7 @@ import { api, errorMessage, type Value } from "../db/api";
 import { effectiveSchema, rowGetter, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { quoteIdent, sqlLiteral } from "../db/sql";
+import { beginIfManual, recordSubmit } from "../db/transactions";
 import {
   activeGrid,
   editorTarget,
@@ -199,12 +200,19 @@ export async function submit() {
   const { changes, targets } = toChanges(submitted, ctx.getRow, ctx.target.columnNames, ctx.target.keyColumns);
   useGrids.setState((s) => ({ submitting: { ...s.submitting, [resultId]: true } }));
   try {
+    // Manual transaction mode: the changes go into a transaction, never straight to disk.
+    const refused = await beginIfManual(ctx.entry.id, sessionId);
+    if (refused) {
+      fail(refused, -1);
+      return;
+    }
     const outcome = await api.apply(sessionId, ctx.target.table, changes);
     if (outcome.status === "applied") {
       useConsoles.getState().mutateRows(ctx.entry.id, resultId, (rows) => commitRows(rows, submitted, targets, outcome.rows));
       setEdits(resultId, afterSubmit(editsOf(resultId), submitted, rowCount));
       useConsoles.getState().setInTransaction(ctx.entry.id, outcome.inTransaction);
       if (outcome.inTransaction) {
+        recordSubmit(ctx.entry.id);
         const n = changes.length;
         useGrids.setState((s) => ({
           notices: {

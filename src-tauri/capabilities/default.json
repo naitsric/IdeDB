@@ -11,6 +11,8 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-set-theme",
     "dialog:allow-open",
-    "dialog:allow-ask"
+    "dialog:allow-ask",
+    "core:window:allow-destroy",
+    "dialog:allow-message"
   ]
 }

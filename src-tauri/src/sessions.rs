@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
-use idedb_core::{QueryEvent, RowChange, SchemaInfo, SchemaModel, ServerInfo, TableRef};
+use idedb_core::{QueryEvent, RowChange, SchemaInfo, SchemaModel, ServerInfo, SqlProblem, TableRef};
 use idedb_store::{HistoryEntry, NewHistoryEntry, Store};
 use serde::Serialize;
 use tauri::State;
@@ -197,6 +197,29 @@ pub async fn session_apply(
     let mut session = session.lock().await;
     let outcome = session.apply(&table, &changes).await?;
     Ok(Response::new(rmp_serde::to_vec_named(&outcome).expect("ApplyOutcome is always serializable")))
+}
+
+/// Validates a statement without running it. The UI calls this on a data
+/// source's explorer session, never a console's, so live diagnostics never
+/// queue behind a running query.
+#[tauri::command]
+pub async fn session_check(
+    id: SessionId,
+    sql: String,
+    schema: Option<String>,
+    sessions: State<'_, Sessions>,
+) -> CommandResult<Option<SqlProblem>> {
+    let session = sessions.get(id)?.session;
+    let mut session = session.lock().await;
+    Ok(session.check(&sql, schema.as_deref()).await?)
+}
+
+/// Sets where unqualified names resolve for a console's session.
+#[tauri::command]
+pub async fn session_set_schema(id: SessionId, schema: String, sessions: State<'_, Sessions>) -> CommandResult<()> {
+    let session = sessions.get(id)?.session;
+    let mut session = session.lock().await;
+    Ok(session.set_schema(&schema).await?)
 }
 
 fn encode(event: &QueryEvent) -> Vec<u8> {

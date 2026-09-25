@@ -72,6 +72,16 @@ pub enum QueryEvent {
     },
 }
 
+/// A problem the engine found in a statement it was asked to check (see
+/// [`Session::check`]) without running it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlProblem {
+    pub message: String,
+    /// Same convention as [`QueryEvent::Error`]'s `position`.
+    pub position: Option<u32>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("connection failed: {0}")]

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use idedb_core::{
     ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, QueryEvent, Result, Row,
-    RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SslMode, TableRef,
+    RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode, TableRef,
 };
 use postgres_native_tls::MakeTlsConnector;
 use tokio::task::JoinHandle;
@@ -167,6 +167,21 @@ impl PgSession {
             }
         }
     }
+
+    /// Parse and Describe only: Postgres validates syntax, names and types
+    /// when it prepares a statement, and runs nothing until Execute. With a
+    /// schema, the search path is set for this check alone (`SET LOCAL`
+    /// inside a transaction that is rolled back).
+    async fn prepare_only(&mut self, sql: &str, schema: Option<&str>) -> Result<(), tokio_postgres::Error> {
+        let Some(schema) = schema.filter(|s| Some(*s) != self.server.default_schema.as_deref()) else {
+            return self.client.prepare(sql).await.map(drop);
+        };
+        let tx = self.client.transaction().await?;
+        tx.batch_execute(&format!("set local search_path to {}", search_path(schema))).await?;
+        let prepared = tx.prepare(sql).await.map(drop);
+        tx.rollback().await?;
+        prepared
+    }
 }
 
 impl Session for PgSession {
@@ -213,6 +228,42 @@ impl Session for PgSession {
         }
         outcome.map_err(|e| Error::Query(format_error(&e)))
     }
+
+    async fn check(&mut self, sql: &str, schema: Option<&str>) -> Result<Option<SqlProblem>> {
+        match self.prepare_only(sql, schema).await {
+            Ok(()) => Ok(None),
+            // Parameters Postgres cannot type without an execution context
+            // (`$1` alone in a select list) are not the user's mistake.
+            Err(e) if e.code() == Some(&SqlState::INDETERMINATE_DATATYPE) => Ok(None),
+            Err(e) if e.as_db_error().is_some() => {
+                Ok(Some(SqlProblem { message: format_error(&e), position: error_position(&e) }))
+            }
+            Err(e) => {
+                self.end_transaction().await;
+                Err(Error::Query(format_error(&e)))
+            }
+        }
+    }
+
+    async fn set_schema(&mut self, schema: &str) -> Result<()> {
+        let sql = if Some(schema) == self.server.default_schema.as_deref() {
+            "reset search_path".to_owned()
+        } else {
+            format!("set search_path to {}", search_path(schema))
+        };
+        self.client.batch_execute(&sql).await.map_err(|e| Error::Query(format_error(&e)))
+    }
+}
+
+/// A search path that starts at `schema` and keeps the server default's
+/// entries (`"$user"`, `public`) reachable after it.
+fn search_path(schema: &str) -> String {
+    let head = quote(schema);
+    if schema == "public" { format!("{head}, \"$user\"") } else { format!("{head}, \"$user\", public") }
+}
+
+pub(crate) fn quote(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 impl Drop for PgSession {

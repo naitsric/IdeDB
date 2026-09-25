@@ -13,7 +13,7 @@ use tokio_postgres::types::{ToSql, Type};
 use tokio_postgres::{Client, Transaction};
 
 use crate::decode::Cell;
-use crate::format_error;
+use crate::{format_error, quote};
 
 pub(crate) async fn apply(
     client: &mut Client,
@@ -135,8 +135,4 @@ fn text_param(value: &Value) -> Option<String> {
             out
         }
     })
-}
-
-fn quote(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
 }

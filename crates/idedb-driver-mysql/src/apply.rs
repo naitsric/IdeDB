@@ -191,6 +191,6 @@ fn params(values: &[ColumnValue]) -> Params {
     )
 }
 
-fn quote(ident: &str) -> String {
+pub(crate) fn quote(ident: &str) -> String {
     format!("`{}`", ident.replace('`', "``"))
 }

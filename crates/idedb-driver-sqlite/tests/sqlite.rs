@@ -264,3 +264,41 @@ async fn applies_row_changes() {
     let (_dir, mut s) = session().await;
     testing::applies_row_changes(&mut s, "main").await;
 }
+
+#[tokio::test]
+async fn checks_without_running_anything() {
+    let (_dir, mut s) = session().await;
+    run(&mut s, "create table idedb_check (id integer primary key, v int)").await;
+    run(&mut s, "insert into idedb_check (v) values (1), (2)").await;
+    testing::check_runs_nothing(
+        &mut s,
+        &[
+            "insert into idedb_check (v) values (3) returning *",
+            "update idedb_check set v = v + 1",
+            "delete from idedb_check",
+            "drop table idedb_check",
+            "create table idedb_check_new (id int)",
+            // SQLite binds missing parameters as NULL, so these compile too.
+            "select * from idedb_check where id = ?1 or v = :v",
+        ],
+        "select count(*), sum(v), (select count(*) from sqlite_schema) from idedb_check",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn checks_report_problems_where_sqlite_locates_them() {
+    let (_dir, mut s) = session().await;
+    run(&mut s, "create table idedb_check_problems (id int)").await;
+    testing::check_reports(&mut s, "select from from idedb_check_problems", "syntax error", Some("from from")).await;
+    // SQLite locates syntax and column problems, not missing tables.
+    testing::check_reports(&mut s, "select * from idedb_missing", "no such table: idedb_missing", None).await;
+    // Multi-byte text before the problem: the position is in chars.
+    testing::check_reports(
+        &mut s,
+        "select 'ñandú', nope from idedb_check_problems",
+        "no such column: nope",
+        Some("nope"),
+    )
+    .await;
+}

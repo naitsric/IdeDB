@@ -5,7 +5,7 @@
 
 use idedb_core::{
     ApplyOutcome, Canceller, ConnectionParams, Engine, QueryEvent, Result, RowChange, SchemaInfo,
-    SchemaModel, ServerInfo, Session, TableRef,
+    SchemaModel, ServerInfo, Session, SqlProblem, TableRef,
 };
 use idedb_driver_mysql::{MySqlCanceller, MySqlSession};
 use idedb_driver_pg::{PgCanceller, PgSession};
@@ -69,6 +69,14 @@ impl AnySession {
 
     pub async fn apply(&mut self, table: &TableRef, changes: &[RowChange]) -> Result<ApplyOutcome> {
         dispatch!(self, s => s.apply(table, changes).await)
+    }
+
+    pub async fn check(&mut self, sql: &str, schema: Option<&str>) -> Result<Option<SqlProblem>> {
+        dispatch!(self, s => s.check(sql, schema).await)
+    }
+
+    pub async fn set_schema(&mut self, schema: &str) -> Result<()> {
+        dispatch!(self, s => s.set_schema(schema).await)
     }
 }
 

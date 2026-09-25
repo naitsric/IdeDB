@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use idedb_core::{
     ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, QueryEvent, Result, Row, RowChange,
-    SchemaInfo, SchemaModel, ServerInfo, Session, TableRef, Value,
+    SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, TableRef, Value,
 };
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, InterruptHandle};
@@ -198,6 +198,26 @@ impl Session for SqliteSession {
         .map_err(|e| Error::Query(format!("sqlite worker failed: {e}")))?
         .map_err(|e| Error::Query(e.to_string()))
     }
+
+    /// Compiling a statement resolves its tables and columns; only stepping
+    /// it runs anything. `schema` does not apply: unqualified names resolve
+    /// across the attached databases.
+    async fn check(&mut self, sql: &str, _schema: Option<&str>) -> Result<Option<SqlProblem>> {
+        let sql = sql.to_owned();
+        self.blocking(move |conn| {
+            Ok(match conn.prepare(&sql) {
+                Ok(_) => None,
+                // Not the user's error: the console sends statements one at a time.
+                Err(rusqlite::Error::MultipleStatement) => None,
+                Err(e) => Some(problem(&e)),
+            })
+        })
+        .await
+    }
+
+    async fn set_schema(&mut self, _schema: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// What a statement did: rows emitted (or changed, for statements without a
@@ -207,19 +227,24 @@ struct Outcome {
     result: rusqlite::Result<bool>,
 }
 
+fn error_event(e: &rusqlite::Error) -> QueryEvent {
+    let SqlProblem { message, position } = problem(e);
+    QueryEvent::Error { message, position }
+}
+
 /// SQLite locates input errors with a byte offset into the statement; report
 /// it as a char offset, and keep the message free of the echoed SQL that
 /// rusqlite's `Display` appends.
-fn error_event(e: &rusqlite::Error) -> QueryEvent {
+fn problem(e: &rusqlite::Error) -> SqlProblem {
     match e {
-        rusqlite::Error::SqlInputError { msg, sql, offset, .. } => QueryEvent::Error {
+        rusqlite::Error::SqlInputError { msg, sql, offset, .. } => SqlProblem {
             message: msg.clone(),
             position: usize::try_from(*offset)
                 .ok()
                 .and_then(|offset| sql.get(..offset))
                 .map(|prefix| prefix.chars().count() as u32),
         },
-        e => QueryEvent::Error { message: e.to_string(), position: None },
+        e => SqlProblem { message: e.to_string(), position: None },
     }
 }
 

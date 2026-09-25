@@ -230,7 +230,18 @@ impl MySqlSession {
         self.cancel.connection_id.store(conn.id(), Ordering::SeqCst);
         self.conn = conn;
         self.broken = false;
+        self.in_transaction = false;
         Ok(())
+    }
+
+    /// Replaces a lost connection and says what the user lost with it: the
+    /// open transaction (rolled back by the server) or other session state.
+    async fn recover(&mut self) -> String {
+        let lost_transaction = self.in_transaction;
+        match self.reconnect().await {
+            Ok(()) => reconnected_notice(lost_transaction, self.database.as_deref()),
+            Err(e) => format!("The connection to the server was lost and reconnecting failed: {}", format_error(&e)),
+        }
     }
 
     async fn run(
@@ -239,9 +250,6 @@ impl MySqlSession {
         page_size: usize,
         emit: &mut (dyn FnMut(QueryEvent) + Send),
     ) -> Result<u64, mysql_async::Error> {
-        if self.broken {
-            self.reconnect().await?;
-        }
         let mut result = self.conn.query_iter(sql).await?;
 
         let Some(columns) = result.columns().filter(|c| !c.is_empty()) else {
@@ -317,6 +325,19 @@ impl Session for MySqlSession {
         page_size: usize,
         emit: &mut (dyn FnMut(QueryEvent) + Send),
     ) {
+        // A statement never runs on a connection that replaced a lost one
+        // without the user hearing about it: what was lost (an open
+        // transaction, temporary tables, variables) could change its meaning.
+        if self.broken {
+            let notice = self.recover().await;
+            emit(QueryEvent::Error {
+                message: format!("{notice} The statement was not run; run it again."),
+                position: None,
+                in_transaction: false,
+            });
+            return;
+        }
+
         self.cancel.begin();
         let started = Instant::now();
         let outcome = self.run(sql, page_size.max(1), emit).await;
@@ -324,18 +345,30 @@ impl Session for MySqlSession {
         self.cancel.end().await;
 
         if let Err(e) = &outcome {
-            self.broken |= e.is_fatal();
+            self.broken |= connection_lost(e);
         }
         // Any statement may have changed the database or the transaction
         // state (USE, BEGIN, COMMIT, a deadlock rollback, ...): ask the server.
         if !self.broken && self.refresh_state().await.is_err() {
             self.broken = true;
         }
+        // Reconnect right away so the next statement runs normally; the
+        // error below tells the user what the lost connection took with it.
+        let lost = if self.broken { Some(self.recover().await) } else { None };
         let in_transaction = self.in_transaction;
 
         // An interrupted SLEEP() returns normally, so the request flag, not
         // the outcome, decides whether the statement was cancelled.
         let cancelled = self.cancel.requested.load(Ordering::SeqCst);
+        if let Some(notice) = lost {
+            let cause = outcome.err().map(|e| format_error(&e)).unwrap_or_default();
+            emit(QueryEvent::Error {
+                message: format!("{cause}\n{notice} The statement may or may not have completed."),
+                position: None,
+                in_transaction,
+            });
+            return;
+        }
         emit(match outcome {
             Ok(row_count) => QueryEvent::Done {
                 row_count,
@@ -375,7 +408,12 @@ impl Session for MySqlSession {
     }
 
     async fn apply(&mut self, table: &TableRef, changes: &[RowChange]) -> Result<ApplyOutcome> {
-        self.ensure_connected().await?;
+        // Changes meant for a transaction the lost connection took along
+        // must not be committed on their own on a fresh one.
+        if self.broken {
+            let notice = self.recover().await;
+            return Err(Error::Connect(format!("{notice} Nothing was saved; submit again.")));
+        }
         let inside = self.refresh_state().await.map_err(|e| self.query_error(e))?;
         apply::apply(&mut self.conn, table, changes, inside)
             .await
@@ -446,9 +484,29 @@ impl MySqlSession {
     }
 
     fn query_error(&mut self, e: mysql_async::Error) -> Error {
-        self.broken |= e.is_fatal();
+        self.broken |= connection_lost(&e);
         Error::Query(format_error(&e))
     }
+}
+
+/// `ER_SERVER_SHUTDOWN`, `ER_CONNECTION_KILLED`, `ER_CLIENT_INTERACTION_TIMEOUT`:
+/// the server ended the connection and said so.
+const CONNECTION_ENDED: [u16; 3] = [1053, 1927, 4031];
+
+/// Whether the error means the connection is gone (I/O, protocol, or the
+/// server ending it), rather than a statement failing.
+fn connection_lost(e: &mysql_async::Error) -> bool {
+    e.is_fatal() || server_code(e).is_some_and(|code| CONNECTION_ENDED.contains(&code))
+}
+
+fn reconnected_notice(lost_transaction: bool, database: Option<&str>) -> String {
+    let restored = database.map(|db| format!(" (current database `{db}` restored)")).unwrap_or_default();
+    let lost = if lost_transaction {
+        "The transaction that was open was rolled back by the server: nothing in it was committed."
+    } else {
+        "Session state such as temporary tables and user variables was reset."
+    };
+    format!("The connection to the server was lost and has been re-established{restored}. {lost}")
 }
 
 enum OpenError {

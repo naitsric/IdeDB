@@ -37,11 +37,15 @@ use crate::decode::Cell;
 
 pub struct PgSession {
     client: Client,
+    /// How to connect again when the connection is lost.
+    config: Config,
     cancel: Arc<CancelState>,
     server: ServerInfo,
     connection: JoinHandle<()>,
     /// Whether the user had a transaction block open after the last statement.
     in_transaction: bool,
+    /// Head of the search path set with `set_schema`, restored on reconnect.
+    schema: Option<String>,
 }
 
 /// Cancels the statement currently running on a session. Cloneable so it can
@@ -141,13 +145,7 @@ impl PgSession {
             config.password(password);
         }
         let tls = tls_connector(params.ssl_mode)?;
-
-        let (client, connection) =
-            config.connect(tls.clone()).await.map_err(|e| Error::Connect(format_error(&e)))?;
-        let connection = tokio::spawn(async move {
-            // The client observes the closed connection on its next call.
-            let _ = connection.await;
-        });
+        let (client, connection) = open(&config, &tls).await.map_err(|e| Error::Connect(format_error(&e)))?;
 
         let row = client
             .query_one("select current_setting('server_version'), current_schema()", &[])
@@ -165,7 +163,39 @@ impl PgSession {
             guard: Mutex::new(Guard::default()),
             request_done: Notify::new(),
         });
-        Ok(Self { client, cancel, server, connection, in_transaction: false })
+        Ok(Self { client, config, cancel, server, connection, in_transaction: false, schema: None })
+    }
+
+    /// Replaces a lost connection, restoring the search path the console chose.
+    async fn reconnect(&mut self) -> Result<(), tokio_postgres::Error> {
+        let (client, connection) = open(&self.config, &self.cancel.tls).await?;
+        if let Some(schema) = &self.schema {
+            client.batch_execute(&format!("set search_path to {}", search_path(schema))).await?;
+        }
+        *self.cancel.token.lock().unwrap() = client.cancel_token();
+        self.connection.abort();
+        self.client = client;
+        self.connection = connection;
+        self.in_transaction = false;
+        Ok(())
+    }
+
+    /// Replaces a lost connection and says what the user lost with it: the
+    /// open transaction (rolled back by the server) or other session state.
+    async fn recover(&mut self) -> String {
+        let lost_transaction = self.in_transaction;
+        match self.reconnect().await {
+            Ok(()) => reconnected_notice(lost_transaction, self.schema.as_deref()),
+            Err(e) => format!("The connection to the server was lost and reconnecting failed: {}", format_error(&e)),
+        }
+    }
+
+    /// Reconnects quietly, for the explorer's reads (introspection, checks).
+    async fn ensure_connected(&mut self) -> Result<()> {
+        if self.client.is_closed() {
+            self.reconnect().await.map_err(|e| Error::Connect(format_error(&e)))?;
+        }
+        Ok(())
     }
 
     /// Whether a transaction block is open, asked of the server itself.
@@ -368,6 +398,32 @@ impl PgSession {
     }
 }
 
+async fn open(config: &Config, tls: &MakeTlsConnector) -> Result<(Client, JoinHandle<()>), tokio_postgres::Error> {
+    let (client, connection) = config.connect(tls.clone()).await?;
+    let connection = tokio::spawn(async move {
+        // The client observes the closed connection on its next call.
+        let _ = connection.await;
+    });
+    Ok((client, connection))
+}
+
+/// Whether the error means the connection is gone: closed, or a FATAL error
+/// (the server ends the session right after sending one, e.g. on
+/// `pg_terminate_backend` or shutdown).
+fn connection_lost(e: &tokio_postgres::Error) -> bool {
+    e.is_closed() || e.as_db_error().is_some_and(|db| db.severity() == "FATAL")
+}
+
+fn reconnected_notice(lost_transaction: bool, schema: Option<&str>) -> String {
+    let restored = schema.map(|s| format!(" (search path `{s}` restored)")).unwrap_or_default();
+    let lost = if lost_transaction {
+        "The transaction that was open was rolled back by the server: nothing in it was committed."
+    } else {
+        "Session state such as temporary tables, prepared statements and settings was reset."
+    };
+    format!("The connection to the server was lost and has been re-established{restored}. {lost}")
+}
+
 fn emit_page(rows: &[tokio_postgres::Row], emit: &mut (dyn FnMut(QueryEvent) + Send)) {
     if rows.is_empty() {
         return;
@@ -391,12 +447,38 @@ impl Session for PgSession {
     }
 
     async fn execute(&mut self, sql: &str, page_size: usize, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+        // A statement never runs on a connection that replaced a lost one
+        // without the user hearing about it: what was lost (an open
+        // transaction, temporary tables, settings) could change its meaning.
+        if self.client.is_closed() {
+            let notice = self.recover().await;
+            emit(QueryEvent::Error {
+                message: format!("{notice} The statement was not run; run it again."),
+                position: None,
+                in_transaction: false,
+            });
+            return;
+        }
+
         let cancel = self.cancel.clone();
         cancel.begin();
         let started = Instant::now();
         let outcome = self.run(sql, page_size.max(1), emit).await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         cancel.end().await;
+
+        // Reconnect right away so the next statement runs normally; the
+        // error tells the user what the lost connection took with it.
+        if self.client.is_closed() || outcome.as_ref().is_err_and(connection_lost) {
+            let notice = self.recover().await;
+            let cause = outcome.err().map(|e| format_error(&e)).unwrap_or_default();
+            emit(QueryEvent::Error {
+                message: format!("{cause}\n{notice} The statement may or may not have completed."),
+                position: None,
+                in_transaction: false,
+            });
+            return;
+        }
 
         // Anything but a read may have opened or closed a transaction block
         // (BEGIN, COMMIT, a failed COMMIT, ...): ask the server.
@@ -422,14 +504,22 @@ impl Session for PgSession {
     }
 
     async fn schemas(&mut self) -> Result<Vec<SchemaInfo>> {
+        self.ensure_connected().await?;
         introspect::schemas(&self.client).await.map_err(|e| Error::Query(format_error(&e)))
     }
 
     async fn introspect(&mut self, schema: &str) -> Result<SchemaModel> {
+        self.ensure_connected().await?;
         introspect::schema(&self.client, schema).await.map_err(|e| Error::Query(format_error(&e)))
     }
 
     async fn apply(&mut self, table: &TableRef, changes: &[RowChange]) -> Result<ApplyOutcome> {
+        // Changes meant for a transaction the lost connection took along
+        // must not be committed on their own on a fresh one.
+        if self.client.is_closed() {
+            let notice = self.recover().await;
+            return Err(Error::Connect(format!("{notice} Nothing was saved; submit again.")));
+        }
         let inside = self.transaction_open().await.map_err(|e| Error::Query(format_error(&e)))?;
         let outcome = apply::apply(&self.client, table, changes, inside).await;
         if outcome.is_err() && !inside {
@@ -439,6 +529,7 @@ impl Session for PgSession {
     }
 
     async fn check(&mut self, sql: &str, schema: Option<&str>) -> Result<Option<SqlProblem>> {
+        self.ensure_connected().await?;
         let inside = self.transaction_open().await.map_err(|e| Error::Query(format_error(&e)))?;
         match self.prepare_only(sql, schema, inside).await {
             Ok(()) => Ok(None),
@@ -467,12 +558,12 @@ impl Session for PgSession {
     /// the change is part of it (undone by a ROLLBACK), as a typed `SET`
     /// would be; it never begins or ends a transaction.
     async fn set_schema(&mut self, schema: &str) -> Result<()> {
-        let sql = if Some(schema) == self.server.default_schema.as_deref() {
-            "reset search_path".to_owned()
-        } else {
-            format!("set search_path to {}", search_path(schema))
-        };
-        self.client.batch_execute(&sql).await.map_err(|e| Error::Query(format_error(&e)))
+        self.ensure_connected().await?;
+        let default = Some(schema) == self.server.default_schema.as_deref();
+        let sql = if default { "reset search_path".to_owned() } else { format!("set search_path to {}", search_path(schema)) };
+        self.client.batch_execute(&sql).await.map_err(|e| Error::Query(format_error(&e)))?;
+        self.schema = (!default).then(|| schema.to_owned());
+        Ok(())
     }
 }
 

@@ -220,6 +220,65 @@ async fn respects_user_transactions() {
     testing::respects_user_transactions(&mut s, "public").await;
 }
 
+/// Ends `victim`'s connection from another session, as a server restart or
+/// an idle timeout would.
+async fn terminate(victim: &mut PgSession) {
+    let pid = rows(&collect(victim, "select pg_backend_pid()", 10).await)[0][0].clone();
+    let Value::Int(pid) = pid else { panic!("{pid:?}") };
+    let mut killer = session().await.unwrap();
+    run_all(&mut killer, &[&format!("select pg_terminate_backend({pid}, 5000)")]).await;
+}
+
+fn last_error(events: &[QueryEvent]) -> (&str, bool) {
+    match events.last() {
+        Some(QueryEvent::Error { message, in_transaction, .. }) => (message, *in_transaction),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+/// A lost connection is replaced with the console's search path restored,
+/// and the user is told what was lost; the statement that finds out is not
+/// silently run on the fresh session.
+#[tokio::test]
+async fn reconnects_with_the_search_path() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["create schema if not exists idedb_reconnect"]).await;
+    s.set_schema("idedb_reconnect").await.unwrap();
+    terminate(&mut s).await;
+
+    let events = collect(&mut s, "select 1", 10).await;
+    let (message, in_transaction) = last_error(&events);
+    assert!(message.contains("re-established") && message.contains("`idedb_reconnect`"), "{message}");
+    assert!(!in_transaction);
+    assert_eq!(
+        rows(&collect(&mut s, "select current_schema()", 10).await),
+        vec![vec![Value::Text("idedb_reconnect".into())]]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_transaction_lost_with_the_connection() {
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "drop table if exists idedb_lost_tx",
+            "create table idedb_lost_tx (id int primary key, v int not null)",
+            "insert into idedb_lost_tx values (1, 0)",
+            "begin",
+            "update idedb_lost_tx set v = 1",
+        ],
+    )
+    .await;
+    terminate(&mut s).await;
+
+    let events = collect(&mut s, "commit", 10).await;
+    let (message, in_transaction) = last_error(&events);
+    assert!(message.contains("rolled back"), "{message}");
+    assert!(!in_transaction);
+    assert_eq!(rows(&collect(&mut s, "select v from idedb_lost_tx", 10).await), vec![vec![Value::Int(0)]]);
+}
+
 /// Statements a cursor cannot run still page inside the user's transaction.
 #[tokio::test]
 async fn streams_non_cursor_statements_inside_a_user_transaction() {

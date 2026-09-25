@@ -32,16 +32,25 @@ pub enum RowChange {
     Delete { key: Vec<ColumnValue> },
 }
 
-/// Result of applying a batch of changes, all in one transaction.
+/// Result of applying a batch of changes as one unit: in the driver's own
+/// transaction, or in a savepoint when the user has a transaction open.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum ApplyOutcome {
-    /// Everything committed. `rows` pairs with the changes: the row as stored
-    /// after an insert or update (defaults, generated ids and server-side
-    /// conversions included, in table column order), `None` for deletes and
-    /// for inserted rows the engine cannot read back.
-    Applied { rows: Vec<Option<Row>> },
-    /// Change `index` failed; nothing was written.
+    /// Everything was written. `rows` pairs with the changes: the row as
+    /// stored after an insert or update (defaults, generated ids and
+    /// server-side conversions included, in table column order), `None` for
+    /// deletes and for inserted rows the engine cannot read back.
+    #[serde(rename_all = "camelCase")]
+    Applied {
+        rows: Vec<Option<Row>>,
+        /// The changes went into the user's open transaction and are not
+        /// committed: the user's COMMIT or ROLLBACK decides. `false` means
+        /// they were committed.
+        in_transaction: bool,
+    },
+    /// Change `index` failed and nothing of the batch was written. Inside a
+    /// user transaction only the batch is undone; the transaction stays open.
     Failed { index: usize, message: String },
 }
 

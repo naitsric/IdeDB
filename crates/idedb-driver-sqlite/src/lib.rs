@@ -156,7 +156,9 @@ impl Session for SqliteSession {
         let worker = tokio::task::spawn_blocking(move || {
             let outcome = {
                 let conn = conn.lock().unwrap_or_else(PoisonError::into_inner);
-                run(&conn, &sql, page_size.max(1), &state.requested, &tx)
+                // SQLite knows exactly whether a transaction is open: it is
+                // in autocommit mode otherwise.
+                (run(&conn, &sql, page_size.max(1), &state.requested, &tx), !conn.is_autocommit())
             };
             state.finish();
             outcome
@@ -168,14 +170,20 @@ impl Session for SqliteSession {
         let elapsed_ms = || started.elapsed().as_millis() as u64;
 
         emit(match worker.await {
-            Ok(Outcome { row_count, result: Ok(cancelled) }) => {
-                QueryEvent::Done { row_count, elapsed_ms: elapsed_ms(), cancelled }
+            Ok((Outcome { row_count, result: Ok(cancelled) }, in_transaction)) => {
+                QueryEvent::Done { row_count, elapsed_ms: elapsed_ms(), cancelled, in_transaction }
             }
-            Ok(Outcome { row_count, result: Err(e) }) if e.sqlite_error_code() == Some(ErrorCode::OperationInterrupted) => {
-                QueryEvent::Done { row_count, elapsed_ms: elapsed_ms(), cancelled: true }
+            Ok((Outcome { row_count, result: Err(e) }, in_transaction))
+                if e.sqlite_error_code() == Some(ErrorCode::OperationInterrupted) =>
+            {
+                QueryEvent::Done { row_count, elapsed_ms: elapsed_ms(), cancelled: true, in_transaction }
             }
-            Ok(Outcome { result: Err(e), .. }) => error_event(&e),
-            Err(e) => QueryEvent::Error { message: format!("sqlite worker failed: {e}"), position: None },
+            Ok((Outcome { result: Err(e), .. }, in_transaction)) => error_event(&e, in_transaction),
+            Err(e) => QueryEvent::Error {
+                message: format!("sqlite worker failed: {e}"),
+                position: None,
+                in_transaction: false,
+            },
         });
     }
 
@@ -192,7 +200,7 @@ impl Session for SqliteSession {
         let conn = self.conn.clone();
         let (table, changes) = (table.clone(), changes.to_vec());
         tokio::task::spawn_blocking(move || {
-            apply::apply(&mut conn.lock().unwrap_or_else(PoisonError::into_inner), &table, &changes)
+            apply::apply(&conn.lock().unwrap_or_else(PoisonError::into_inner), &table, &changes)
         })
         .await
         .map_err(|e| Error::Query(format!("sqlite worker failed: {e}")))?
@@ -227,9 +235,9 @@ struct Outcome {
     result: rusqlite::Result<bool>,
 }
 
-fn error_event(e: &rusqlite::Error) -> QueryEvent {
+fn error_event(e: &rusqlite::Error, in_transaction: bool) -> QueryEvent {
     let SqlProblem { message, position } = problem(e);
-    QueryEvent::Error { message, position }
+    QueryEvent::Error { message, position, in_transaction }
 }
 
 /// SQLite locates input errors with a byte offset into the statement; report

@@ -155,7 +155,10 @@ pub async fn applies_row_changes(session: &mut impl Session, schema: &str) {
         .expect("apply");
     assert_eq!(
         outcome,
-        ApplyOutcome::Applied { rows: vec![Some(row(1, "x", Value::Null)), Some(row(3, "z", Value::Null)), None] }
+        ApplyOutcome::Applied {
+            rows: vec![Some(row(1, "x", Value::Null)), Some(row(3, "z", Value::Null)), None],
+            in_transaction: false,
+        }
     );
     assert_eq!(contents(session).await, vec![row(1, "x", Value::Null), row(3, "z", Value::Null)]);
 
@@ -164,7 +167,10 @@ pub async fn applies_row_changes(session: &mut impl Session, schema: &str) {
         .apply(&table, &[RowChange::Update { key: key(3, "z"), values: vec![cv("b", text("w")), cv("note", text("three"))] }])
         .await
         .expect("apply");
-    assert_eq!(outcome, ApplyOutcome::Applied { rows: vec![Some(row(3, "w", text("three")))] });
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied { rows: vec![Some(row(3, "w", text("three")))], in_transaction: false }
+    );
 
     // Any failure rolls back the whole batch: a missing row...
     let outcome = session
@@ -194,6 +200,114 @@ pub async fn applies_row_changes(session: &mut impl Session, schema: &str) {
     assert_eq!(outcome, ApplyOutcome::Failed { index: 0, message: ROW_NOT_FOUND.into() });
 
     assert_eq!(contents(session).await, vec![row(1, "x", Value::Null), row(3, "w", text("three"))]);
+    assert_usable(session).await;
+}
+
+/// A transaction the user opened is never committed or rolled back behind
+/// the user's back: not by a paged read, not by a cancel between pages, not
+/// by the data editor or a check. Creates `idedb_user_tx` in `schema`, which
+/// must be where unqualified names resolve.
+pub async fn respects_user_transactions(session: &mut impl Session, schema: &str) {
+    for sql in [
+        "drop table if exists idedb_user_tx",
+        "create table idedb_user_tx (id int primary key, v int not null)",
+        "insert into idedb_user_tx (id, v) values (1, 0), (2, 0), (3, 0), (4, 0), (5, 0)",
+    ] {
+        let events = collect(session, sql, 10).await;
+        assert!(matches!(events.last(), Some(QueryEvent::Done { .. })), "{sql}: {events:?}");
+    }
+    let changed = async |session: &mut _| {
+        rows(&collect(session, "select count(*) from idedb_user_tx where v <> 0", 10).await)
+    };
+    let unchanged = vec![vec![Value::Int(0)]];
+    let expect_tx = async |session: &mut _, sql: &str, open: bool| {
+        let events = collect(session, sql, 2).await;
+        match events.last() {
+            Some(QueryEvent::Done { in_transaction, .. }) => {
+                assert_eq!(*in_transaction, open, "{sql}: wrong transaction state in {events:?}")
+            }
+            other => panic!("{sql}: {other:?}"),
+        }
+        events
+    };
+
+    // A paged read (three pages) inside the user's transaction commits nothing.
+    expect_tx(session, "select v from idedb_user_tx", false).await;
+    expect_tx(session, "begin", true).await;
+    expect_tx(session, "update idedb_user_tx set v = 1", true).await;
+    let read = expect_tx(session, "select id from idedb_user_tx order by id", true).await;
+    assert_eq!(rows(&read).len(), 5, "{read:?}");
+    expect_tx(session, "rollback", false).await;
+    assert_eq!(changed(session).await, unchanged, "a paged read committed the user's transaction");
+
+    // Nor does a cancel between pages. (With five rows the read may finish
+    // before the cancel lands; `cancels_between_pages` covers interrupting
+    // it. Either way the user's transaction must still be open.)
+    expect_tx(session, "begin", true).await;
+    expect_tx(session, "update idedb_user_tx set v = 2", true).await;
+    let canceller = session.canceller();
+    let mut last = None;
+    session
+        .execute("select id from idedb_user_tx order by id", 2, &mut |e| {
+            if matches!(e, QueryEvent::Rows { .. }) {
+                let c = canceller.clone();
+                tokio::spawn(async move { c.cancel().await });
+            }
+            last = Some(e);
+        })
+        .await;
+    assert!(
+        matches!(last, Some(QueryEvent::Done { in_transaction: true, .. })),
+        "a cancel between pages must leave the transaction open: {last:?}"
+    );
+    collect(session, "rollback", 10).await;
+    assert_eq!(changed(session).await, unchanged, "a cancelled read committed the user's transaction");
+
+    // Data editor changes inside the user's transaction stay uncommitted...
+    let table = TableRef { schema: schema.into(), name: "idedb_user_tx".into() };
+    let id = |id: i64| vec![ColumnValue { column: "id".into(), value: Value::Int(id) }];
+    let set_v = |v: i64| vec![ColumnValue { column: "v".into(), value: Value::Int(v) }];
+    expect_tx(session, "begin", true).await;
+    let outcome = session
+        .apply(&table, &[RowChange::Update { key: id(1), values: set_v(3) }])
+        .await
+        .expect("apply");
+    assert!(matches!(outcome, ApplyOutcome::Applied { in_transaction: true, .. }), "{outcome:?}");
+    // ...a failed batch undoes only itself and leaves the transaction open...
+    expect_tx(session, "update idedb_user_tx set v = 4 where id = 2", true).await;
+    let outcome = session
+        .apply(
+            &table,
+            &[
+                RowChange::Update { key: id(3), values: set_v(5) },
+                RowChange::Update { key: id(99), values: set_v(5) },
+            ],
+        )
+        .await
+        .expect("apply");
+    assert!(matches!(outcome, ApplyOutcome::Failed { index: 1, .. }), "{outcome:?}");
+    let inside = rows(&expect_tx(session, "select id, v from idedb_user_tx where v <> 0 order by id", true).await);
+    assert_eq!(
+        inside,
+        vec![vec![Value::Int(1), Value::Int(3)], vec![Value::Int(2), Value::Int(4)]],
+        "a failed batch must undo only its own changes"
+    );
+    // ...and so does a check.
+    let problem = session.check("select nope from idedb_user_tx", None).await.expect("check");
+    assert!(problem.is_some(), "the check should report the unknown column");
+    expect_tx(session, "select 1", true).await;
+    // The user's ROLLBACK undoes all of it.
+    expect_tx(session, "rollback", false).await;
+    assert_eq!(changed(session).await, unchanged, "the data editor committed the user's transaction");
+
+    // Outside a transaction the data editor still commits.
+    let outcome = session
+        .apply(&table, &[RowChange::Update { key: id(1), values: set_v(6) }])
+        .await
+        .expect("apply");
+    assert!(matches!(outcome, ApplyOutcome::Applied { in_transaction: false, .. }), "{outcome:?}");
+    expect_tx(session, "select 1", false).await;
+    assert_eq!(changed(session).await, vec![vec![Value::Int(1)]]);
     assert_usable(session).await;
 }
 

@@ -37,8 +37,10 @@ export const ResultView = memo(function ResultView({
   const schema = result?.table?.schema;
   const load = useDataSources((s) => (entry && schema ? s.explorers[entry.dataSourceId]?.models[schema] : undefined));
   const explorerConnected = useDataSources((s) => !!entry && s.explorers[entry.dataSourceId]?.status === "connected");
-  // `load` makes the target follow the introspected structure as it arrives.
-  const target = useMemo(() => editorTarget(entry, result), [entry, result, load]);
+  const submitting = useGrids((s) => (result ? !!s.submitting[result.id] : false));
+  // `load` makes the target follow the introspected structure as it arrives;
+  // `submitting` makes the grid read-only while a submit runs.
+  const target = useMemo(() => editorTarget(entry, result), [entry, result, load, submitting]);
 
   // Editing and foreign key navigation need the table's structure.
   useEffect(() => {

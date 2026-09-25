@@ -1,5 +1,4 @@
 import type { DataEditorRef, GridSelection } from "@glideapps/glide-data-grid";
-import { save } from "@tauri-apps/plugin-dialog";
 import { openTableData } from "../actions";
 import { api, errorMessage, type Value } from "../db/api";
 import { effectiveSchema, rowGetter, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
@@ -18,12 +17,14 @@ import {
 } from "./dataEditor";
 import {
   addRow,
+  afterSubmit,
   cellValue,
   changeCount,
   commitRows,
   DEFAULT,
   deleteRows,
   duplicateRows,
+  generatedColumns,
   NO_EDITS,
   revertRows,
   setCell,
@@ -87,7 +88,7 @@ export function pendingChanges(): number {
  */
 export function editCell(consoleId: string, resultId: number, row: number, col: number, value: Value) {
   const result = useConsoles.getState().consoles[consoleId]?.results.find((r) => r.id === resultId);
-  if (!result) return;
+  if (!result || useGrids.getState().submitting[resultId]) return;
   const getRow = rowGetter(resultId);
   const binary =
     getRow(row)?.[col] instanceof Uint8Array ||
@@ -108,17 +109,15 @@ export function addNewRow() {
   selectCell(ctx.result.id, 0, visibleRowCount(ctx.result) - 1);
 }
 
-/** Duplicates the selected rows; a key with a default (serial, identity) is left to generate. */
+/** Duplicates the selected rows, leaving what the database generates (ids, computed columns) to it. */
 export function duplicateSelectedRows() {
   const ctx = editing();
   if (!ctx) return;
   const rows = selectedRows(useGrids.getState().selections[ctx.result.id]);
   if (rows.length === 0) return;
-  const generatedKeys = new Set(
-    ctx.target.keyColumns.filter((col) => ctx.target.info.columns.find((c) => c.name === ctx.target.columnNames[col])?.default),
-  );
+  const generated = generatedColumns(ctx.target.columnNames, ctx.target.info.columns);
   const width = ctx.result.columns.length;
-  setEdits(ctx.result.id, duplicateRows(ctx.edits, ctx.result.rowCount, ctx.getRow, rows, width, generatedKeys));
+  setEdits(ctx.result.id, duplicateRows(ctx.edits, ctx.result.rowCount, ctx.getRow, rows, width, generated));
   selectCell(ctx.result.id, 0, visibleRowCount(ctx.result) - 1);
 }
 
@@ -143,15 +142,21 @@ export function setSelectedNull() {
   setEdits(ctx.result.id, edits);
 }
 
-export function revertSelected() {
+/** The active grid, unless a submit is running on it (its edits are being written). */
+function idleGrid() {
   const grid = activeGrid();
+  return grid && !useGrids.getState().submitting[grid.result.id] ? grid : undefined;
+}
+
+export function revertSelected() {
+  const grid = idleGrid();
   if (!grid) return;
   const rows = selectedRows(useGrids.getState().selections[grid.result.id]);
   setEdits(grid.result.id, revertRows(editsOf(grid.result.id), grid.result.rowCount, rows));
 }
 
 export function revertAll() {
-  const grid = activeGrid();
+  const grid = idleGrid();
   if (grid) setEdits(grid.result.id, NO_EDITS);
 }
 
@@ -171,9 +176,10 @@ function commitCellEditor() {
 }
 
 /**
- * Writes all pending changes in one transaction. On success the loaded rows
- * take what the database stored, in place, so the grid keeps its scroll; on
- * failure nothing is written and the failing row is selected.
+ * Writes all pending changes as one unit. On success the loaded rows take
+ * what the database stored, in place, so the grid keeps its scroll; on
+ * failure nothing is written and the failing row is selected. Inside a
+ * transaction the user opened, the changes join it without committing.
  */
 export async function submit() {
   commitCellEditor();
@@ -188,16 +194,27 @@ export async function submit() {
     return;
   }
 
-  const { changes, targets } = toChanges(ctx.edits, ctx.getRow, ctx.target.columnNames, ctx.target.keyColumns);
+  const submitted = ctx.edits;
+  const rowCount = ctx.result.rowCount;
+  const { changes, targets } = toChanges(submitted, ctx.getRow, ctx.target.columnNames, ctx.target.keyColumns);
   useGrids.setState((s) => ({ submitting: { ...s.submitting, [resultId]: true } }));
   try {
     const outcome = await api.apply(sessionId, ctx.target.table, changes);
     if (outcome.status === "applied") {
-      const edits = ctx.edits;
-      useConsoles.getState().mutateRows(ctx.entry.id, resultId, (rows) => commitRows(rows, edits, targets, outcome.rows));
-      setEdits(resultId, NO_EDITS);
+      useConsoles.getState().mutateRows(ctx.entry.id, resultId, (rows) => commitRows(rows, submitted, targets, outcome.rows));
+      setEdits(resultId, afterSubmit(editsOf(resultId), submitted, rowCount));
+      useConsoles.getState().setInTransaction(ctx.entry.id, outcome.inTransaction);
+      if (outcome.inTransaction) {
+        const n = changes.length;
+        useGrids.setState((s) => ({
+          notices: {
+            ...s.notices,
+            [resultId]: `${n} ${n === 1 ? "change" : "changes"} applied inside the open transaction, not committed: COMMIT or ROLLBACK decides`,
+          },
+        }));
+      }
       // Deleted rows shift the ones below, so the old selection would point elsewhere.
-      if (edits.deleted.size > 0) select(resultId, EMPTY_SELECTION);
+      if (submitted.deleted.size > 0) select(resultId, EMPTY_SELECTION);
     } else {
       const target = targets[outcome.index];
       const row = target.kind === "insert" ? ctx.result.rowCount + target.index : target.row;
@@ -254,16 +271,19 @@ export async function exportResult(format: ExportFormat) {
   if (!grid || !engine) return;
   const { result } = grid;
   const extension = EXPORT_EXTENSION[format];
-  const path = await save({
-    defaultPath: `${result.table?.name ?? "result"}.${extension}`,
-    filters: [{ name: EXPORT_LABEL[format], extensions: [extension] }],
-  });
-  if (!path) return;
+  const notice = (message: string) => useGrids.setState((s) => ({ notices: { ...s.notices, [result.id]: message } }));
+  let target: { token: number; fileName: string } | null;
+  try {
+    target = await api.exportBegin(`${result.table?.name ?? "result"}.${extension}`, EXPORT_LABEL[format], extension);
+  } catch (e) {
+    notice(`Export failed: ${errorMessage(e)}`);
+    return;
+  }
+  if (!target) return;
 
   const getRow = rowGetter(result.id);
   const columns = result.columns.map((c) => c.name);
   const total = result.rowCount;
-  const notice = (message: string) => useGrids.setState((s) => ({ notices: { ...s.notices, [result.id]: message } }));
   try {
     for (let from = 0; from < Math.max(total, 1); from += EXPORT_CHUNK_ROWS) {
       const rows: Value[][] = [];
@@ -287,18 +307,20 @@ export async function exportResult(format: ExportFormat) {
           chunk = (rows.length ? toInserts(engine.engine, result.table ?? null, engine.defaultSchema, columns, rows) + "\n" : "");
           break;
       }
-      await api.exportWrite(path, chunk, first);
+      await api.exportWrite(target.token, chunk);
     }
-    notice(`Exported ${total.toLocaleString("en-US")} rows to ${path.split("/").pop()}`);
+    notice(`Exported ${total.toLocaleString("en-US")} rows to ${target.fileName}`);
   } catch (e) {
     notice(`Export failed: ${errorMessage(e)}`);
+  } finally {
+    void api.exportFinish(target.token).catch(() => {});
   }
 }
 
 /** Opens the table a foreign key points to, filtered to the referenced row. */
 export function goToReferencedRow() {
   const target = referencedRow();
-  if (target) openTableData(target.sourceId, target.schema, target.table, { where: target.where });
+  if (target) void openTableData(target.sourceId, target.schema, target.table, { where: target.where });
 }
 
 /** The row the selected foreign key cell points to, as a filter on the referenced table. */

@@ -38,6 +38,7 @@ pub fn run() {
             Ok(())
         })
         .manage(sessions::Sessions::default())
+        .manage(export::Exports::default())
         .invoke_handler(tauri::generate_handler![
             data_sources::data_sources_list,
             data_sources::data_source_save,
@@ -53,7 +54,9 @@ pub fn run() {
             sessions::session_apply,
             sessions::session_check,
             sessions::session_set_schema,
+            export::export_begin,
             export::export_write,
+            export::export_finish,
             menu::menu_set,
         ])
         .run(tauri::generate_context!())

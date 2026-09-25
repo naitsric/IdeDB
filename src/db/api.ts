@@ -45,6 +45,8 @@ export interface ColumnInfo {
   default: string | null;
   primaryKey: number | null;
   comment: string | null;
+  /** The database fills it itself: identity, auto-increment, serial, computed, rowid. */
+  generated: boolean;
 }
 
 export interface ForeignKey {
@@ -78,9 +80,10 @@ export interface Column {
 export type QueryEvent =
   | { kind: "columns"; columns: Column[] }
   | { kind: "rows"; rows: Value[][] }
-  | { kind: "done"; rowCount: number; elapsedMs: number; cancelled: boolean }
+  /** `inTransaction`: the user has a transaction open after the statement (BEGIN, or autocommit off). */
+  | { kind: "done"; rowCount: number; elapsedMs: number; cancelled: boolean; inTransaction: boolean }
   /** `position`: code points into the statement where the engine located the error. */
-  | { kind: "error"; message: string; position: number | null };
+  | { kind: "error"; message: string; position: number | null; inTransaction: boolean };
 
 export type Row = Value[];
 
@@ -102,9 +105,12 @@ export type RowChange =
   | { kind: "delete"; key: ColumnValue[] };
 
 export type ApplyOutcome =
-  /** `rows` pairs with the changes: the stored row, or null (deletes, unreadable inserts). */
-  | { status: "applied"; rows: (Row | null)[] }
-  /** Change `index` failed; nothing was written. */
+  /**
+   * `rows` pairs with the changes: the stored row, or null (deletes, unreadable inserts).
+   * `inTransaction`: written into the user's open transaction, not committed.
+   */
+  | { status: "applied"; rows: (Row | null)[]; inTransaction: boolean }
+  /** Change `index` failed; nothing of the batch was written. */
   | { status: "failed"; index: number; message: string };
 
 /** JSON cannot carry bigint or bytes: bigint goes as text (every engine casts it back), bytes as a number array. */
@@ -201,8 +207,18 @@ export const api = {
     return decode(new Uint8Array(bytes), { useBigInt64: true }) as ApplyOutcome;
   },
 
-  /** Writes one chunk of an export; `first` truncates the file. */
-  exportWrite: (path: string, chunk: string, first: boolean) => invoke<void>("export_write", { path, chunk, first }),
+  /**
+   * Asks the user where to export (the dialog runs in the backend) and
+   * returns a token for that file, or `null` if cancelled. The UI never
+   * handles a path, so it cannot write anywhere else.
+   */
+  exportBegin: (fileName: string, formatName: string, extension: string) =>
+    invoke<{ token: number; fileName: string } | null>("export_begin", { fileName, formatName, extension }),
+
+  /** Appends one chunk to the export's file. */
+  exportWrite: (token: number, chunk: string) => invoke<void>("export_write", { token, chunk }),
+
+  exportFinish: (token: number) => invoke<void>("export_finish", { token }),
 
   /** Newest first; `search` is a case-insensitive substring. */
   history: (dataSourceId: string | null, search: string | null, limit: number) =>

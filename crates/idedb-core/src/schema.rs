@@ -53,6 +53,10 @@ pub struct ColumnInfo {
     pub default: Option<String>,
     /// 1-based position within the primary key, if part of it.
     pub primary_key: Option<u16>,
+    /// The database fills the value itself: auto-increment and identity
+    /// columns, sequence defaults, computed (generated) columns, SQLite's
+    /// rowid alias. A copied row leaves it for the database to fill.
+    pub generated: bool,
     pub comment: Option<String>,
 }
 

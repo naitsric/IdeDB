@@ -27,3 +27,6 @@ tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-window-state = "2"
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

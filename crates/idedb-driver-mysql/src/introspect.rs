@@ -15,6 +15,7 @@ type ColumnRow = (
     String,
     Option<String>,
     Option<String>,
+    String,
 );
 
 const SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "mysql", "performance_schema", "sys"];
@@ -68,17 +69,23 @@ pub(crate) async fn introspect(conn: &mut Conn, schema: &str) -> mysql_async::Re
 
     let columns: Vec<ColumnRow> = conn
         .exec(
-            "select TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT
+            "select TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT, EXTRA
              from information_schema.COLUMNS
              where TABLE_SCHEMA = ?
              order by TABLE_NAME, ORDINAL_POSITION",
             (schema,),
         )
         .await?;
-    for (table, name, type_name, nullable, default, comment) in columns {
+    for (table, name, type_name, nullable, default, comment, extra) in columns {
         let Some(&i) = index.get(&table) else {
             continue;
         };
+        // EXTRA says `auto_increment`, `VIRTUAL GENERATED` or `STORED
+        // GENERATED`; `DEFAULT_GENERATED` is an ordinary expression default.
+        let extra = extra.to_ascii_lowercase();
+        let generated = extra.contains("auto_increment")
+            || extra.contains("virtual generated")
+            || extra.contains("stored generated");
         model.tables[i].columns.push(ColumnInfo {
             name,
             type_name,
@@ -86,6 +93,7 @@ pub(crate) async fn introspect(conn: &mut Conn, schema: &str) -> mysql_async::Re
             default,
             primary_key: None,
             comment: comment.filter(|c| !c.is_empty()),
+            generated,
         });
     }
 

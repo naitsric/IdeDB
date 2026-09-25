@@ -26,7 +26,10 @@ pub(crate) async fn schema(client: &Client, schema: &str) -> Result<SchemaModel,
         .query(
             "select c.relname::text, c.relkind::text, obj_description(c.oid, 'pg_class'),
                     a.attname::text, format_type(a.atttypid, a.atttypmod), not a.attnotnull,
-                    pg_get_expr(d.adbin, d.adrelid), col_description(c.oid, a.attnum)
+                    pg_get_expr(d.adbin, d.adrelid), col_description(c.oid, a.attnum),
+                    -- identity, GENERATED ... STORED, or a sequence default (serial)
+                    a.attidentity <> '' or a.attgenerated <> ''
+                      or coalesce(pg_get_expr(d.adbin, d.adrelid), '') like 'nextval(%'
              from pg_class c
              join pg_namespace n on n.oid = c.relnamespace
              left join pg_attribute a on a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
@@ -103,6 +106,7 @@ pub(crate) async fn schema(client: &Client, schema: &str) -> Result<SchemaModel,
             default: row.get(6),
             primary_key,
             comment: row.get(7),
+            generated: row.get::<_, Option<bool>>(8).unwrap_or(false),
         });
     }
 

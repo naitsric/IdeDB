@@ -63,12 +63,18 @@ pub enum QueryEvent {
         row_count: u64,
         elapsed_ms: u64,
         cancelled: bool,
+        /// Whether the session is inside a transaction the user opened
+        /// (`BEGIN`, or autocommit off), as of after this statement.
+        in_transaction: bool,
     },
+    #[serde(rename_all = "camelCase")]
     Error {
         message: String,
         /// Where the engine located the error, as a 0-based offset in Unicode
         /// scalar values (Rust `char`s) into the executed statement text.
         position: Option<u32>,
+        /// Same as in `Done`.
+        in_transaction: bool,
     },
 }
 

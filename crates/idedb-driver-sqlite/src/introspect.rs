@@ -54,22 +54,38 @@ pub(crate) fn schema_model(conn: &Connection, schema: &str) -> rusqlite::Result<
 
 fn columns(conn: &Connection, schema: &str, table: &str) -> rusqlite::Result<Vec<ColumnInfo>> {
     // hidden = 1 marks virtual-table hidden columns; generated columns (2, 3) are real columns.
-    conn.prepare(
-        r#"select name, type, "notnull", dflt_value, pk from pragma_table_xinfo(?1, ?2)
-           where hidden <> 1 order by cid"#,
-    )?
-    .query_map([table, schema], |r| {
-        let pk: u16 = r.get(4)?;
-        Ok(ColumnInfo {
-            name: r.get(0)?,
-            type_name: r.get::<_, String>(1)?.to_lowercase(),
-            nullable: !r.get::<_, bool>(2)?,
-            default: r.get(3)?,
-            primary_key: (pk > 0).then_some(pk),
-            comment: None,
-        })
-    })?
-    .collect()
+    let mut columns: Vec<ColumnInfo> = conn
+        .prepare(
+            r#"select name, type, "notnull", dflt_value, pk, hidden in (2, 3) from pragma_table_xinfo(?1, ?2)
+               where hidden <> 1 order by cid"#,
+        )?
+        .query_map([table, schema], |r| {
+            let pk: u16 = r.get(4)?;
+            Ok(ColumnInfo {
+                name: r.get(0)?,
+                type_name: r.get::<_, String>(1)?.to_lowercase(),
+                nullable: !r.get::<_, bool>(2)?,
+                default: r.get(3)?,
+                primary_key: (pk > 0).then_some(pk),
+                comment: None,
+                generated: r.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    // A single `INTEGER PRIMARY KEY` column of a rowid table is the rowid
+    // itself, which SQLite assigns when an insert leaves it out.
+    let rowid_table: bool = conn
+        .query_row("select wr = 0 from pragma_table_list where schema = ?1 and name = ?2", [schema, table], |r| r.get(0))
+        .unwrap_or(true);
+    let mut keys = columns.iter_mut().filter(|c| c.primary_key.is_some());
+    if let (Some(key), None) = (keys.next(), keys.next())
+        && rowid_table
+        && key.type_name == "integer"
+    {
+        key.generated = true;
+    }
+    Ok(columns)
 }
 
 fn foreign_keys(conn: &Connection, schema: &str, table: &str) -> rusqlite::Result<Vec<ForeignKey>> {

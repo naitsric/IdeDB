@@ -1,3 +1,4 @@
+import { ask } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import { api, errorMessage, type Column, type SessionId, type TableRef, type Value } from "./api";
 import { invalidateChecks } from "./checkRevisions";
@@ -49,6 +50,8 @@ export interface ConsoleState {
   sessionId?: SessionId;
   connecting?: boolean;
   connectError?: string;
+  /** The session has a transaction the user opened, as of its last statement. */
+  inTransaction?: boolean;
   results: ResultMeta[];
   activeResultId?: number;
   /** Results opened so far, for numbering new tabs. */
@@ -62,15 +65,24 @@ interface ConsolesState {
   setSql: (id: string, sql: string) => void;
   /**
    * Runs one statement into a result tab and resolves to its final state, or
-   * to `undefined` when nothing ran (busy console, no session).
+   * to `undefined` when nothing ran (busy console, no session, or the user
+   * kept the pending edits the run would have replaced). `confirmed`: the
+   * caller already asked with `confirmReplace`.
    */
   runStatement: (
     id: string,
     sql: string,
-    options?: { newTab?: boolean; table?: TableRef },
+    options?: { newTab?: boolean; table?: TableRef; confirmed?: boolean },
   ) => Promise<ResultMeta | undefined>;
+  /**
+   * Whether a run may replace the result it would reuse: asks first when
+   * that result has data editor changes not yet submitted.
+   */
+  confirmReplace: (id: string, options?: { newTab?: boolean }) => Promise<boolean>;
   /** Changes a result's loaded rows in place and repaints its grid. */
   mutateRows: (id: string, resultId: number, change: (rows: Value[][]) => void) => void;
+  /** Records whether the console's session has a user transaction open (after a data editor submit). */
+  setInTransaction: (id: string, inTransaction: boolean) => void;
   setTableFilter: (id: string, filter: TableFilter) => void;
   /** Switches the console's current schema; `undefined` goes back to the server default. */
   setSchema: (id: string, schema: string | undefined) => Promise<void>;
@@ -150,6 +162,35 @@ function persist(consoles: Record<string, ConsoleState>) {
 
 let nextResultId = 0;
 
+/** Session opens in flight, by console. */
+const sessionOpens = new Map<string, Promise<SessionId | undefined>>();
+
+/**
+ * Counts a result's data editor changes not yet submitted. The grid module
+ * installs it (it depends on this one, not the other way around).
+ */
+let pendingChangesOf: (resultId: number) => number = () => 0;
+
+export function setPendingChangesProbe(probe: (resultId: number) => number) {
+  pendingChangesOf = probe;
+}
+
+/** The one place that asks before unsubmitted changes are thrown away. */
+async function confirmDiscard(count: number): Promise<boolean> {
+  return ask("They have not been submitted and will be lost.", {
+    title: `Discard ${count} pending ${count === 1 ? "change" : "changes"}?`,
+    kind: "warning",
+    okLabel: "Discard",
+    cancelLabel: "Keep Editing",
+  });
+}
+
+/** The result a run would reuse: the active tab, unless asked for a new one or pinned. */
+function replacedResult(entry: ConsoleState | undefined, newTab: boolean): ResultMeta | undefined {
+  const current = activeResult(entry);
+  return !newTab && current && !current.pinned ? current : undefined;
+}
+
 export const useConsoles = create<ConsolesState>((set, get) => {
   const patch = (id: string, change: Partial<ConsoleState>) =>
     set((s) => (s.consoles[id] ? { consoles: { ...s.consoles, [id]: { ...s.consoles[id], ...change } } } : {}));
@@ -162,22 +203,37 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       return { consoles: { ...s.consoles, [id]: { ...entry, results } } };
     });
 
-  async function ensureSession(id: string): Promise<SessionId | undefined> {
+  /** The console's session, opening it on first use. Runs started while it opens share the one open. */
+  function ensureSession(id: string): Promise<SessionId | undefined> {
     const entry = get().consoles[id];
-    if (!entry) return undefined;
-    if (entry.sessionId !== undefined) return entry.sessionId;
+    if (!entry) return Promise.resolve(undefined);
+    if (entry.sessionId !== undefined) return Promise.resolve(entry.sessionId);
+    let pending = sessionOpens.get(id);
+    if (!pending) {
+      pending = openSession(id, entry.dataSourceId).finally(() => sessionOpens.delete(id));
+      sessionOpens.set(id, pending);
+    }
+    return pending;
+  }
 
+  async function openSession(id: string, dataSourceId: string): Promise<SessionId | undefined> {
     patch(id, { connecting: true, connectError: undefined });
     try {
-      const opened = await openSessionFor(entry.dataSourceId);
+      const opened = await openSessionFor(dataSourceId);
+      // Nobody to hand it to: the console was closed or its data source deleted meanwhile.
+      const gone = !get().consoles[id] || !useDataSources.getState().sources.some((s) => s.id === dataSourceId);
+      if (opened && gone) {
+        await api.closeSession(opened.id).catch(() => {});
+        return undefined;
+      }
       // A new session starts on the server default: re-apply the console's schema.
       const schema = get().consoles[id]?.schema;
       if (opened && schema) {
         await api.setSchema(opened.id, schema).catch((e) => patch(id, { connectError: errorMessage(e) }));
       }
-      patch(id, { connecting: false, sessionId: opened?.id });
+      patch(id, { connecting: false, sessionId: opened?.id, inTransaction: false });
       // Connecting a console also connects the explorer, as DataGrip does.
-      if (opened) void useDataSources.getState().connect(entry.dataSourceId);
+      if (opened) void useDataSources.getState().connect(dataSourceId);
       return opened?.id;
     } catch (e) {
       patch(id, { connecting: false, connectError: errorMessage(e) });
@@ -189,8 +245,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
   function openResult(id: string, sql: string, newTab: boolean, table?: TableRef): number | undefined {
     const entry = get().consoles[id];
     if (!entry) return undefined;
-    const current = activeResult(entry);
-    const replace = !newTab && current && !current.pinned ? current : undefined;
+    const replace = replacedResult(entry, newTab);
     const resultCount = replace ? entry.resultCount : entry.resultCount + 1;
     const result: ResultMeta = {
       id: ++nextResultId,
@@ -232,12 +287,20 @@ export const useConsoles = create<ConsolesState>((set, get) => {
 
     setSql: (id, sql) => patch(id, { sql }),
 
+    confirmReplace: async (id, options = {}) => {
+      const replaced = replacedResult(get().consoles[id], options.newTab ?? false);
+      const pending = replaced ? pendingChangesOf(replaced.id) : 0;
+      return pending === 0 || confirmDiscard(pending);
+    },
+
     runStatement: async (id, sql, options = {}) => {
       const statement = sql.trim();
       if (!statement || isRunning(get().consoles[id])) return undefined;
+      if (!options.confirmed && !(await get().confirmReplace(id, options))) return undefined;
 
       const sessionId = await ensureSession(id);
-      if (sessionId === undefined) return undefined;
+      // Another run that shared the session open may have started meanwhile.
+      if (sessionId === undefined || isRunning(get().consoles[id])) return undefined;
       const resultId = openResult(id, statement, options.newTab ?? false, options.table);
       if (resultId === undefined) return undefined;
 
@@ -276,6 +339,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
                 affectedRows: hasColumns ? undefined : event.rowCount,
                 elapsedMs: event.elapsedMs,
               });
+              patch(id, { inTransaction: event.inTransaction });
               break;
             case "error":
               cancelAnimationFrame(frame);
@@ -285,13 +349,14 @@ export const useConsoles = create<ConsolesState>((set, get) => {
                 errorPosition: event.position ?? undefined,
                 rowCount: rows.length,
               });
+              patch(id, { inTransaction: event.inTransaction });
               break;
           }
         })
         .catch((e) => {
           // The session is gone (for example, its data source was disconnected).
           update({ status: "error", error: errorMessage(e) });
-          patch(id, { sessionId: undefined });
+          patch(id, { sessionId: undefined, inTransaction: false });
         });
       // Whatever ran may have created or dropped objects the editors check against.
       const dataSourceId = get().consoles[id]?.dataSourceId;
@@ -313,6 +378,8 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       change(rows);
       patchResult(id, resultId, { rowCount: rows.length, version: result.version + 1 });
     },
+
+    setInTransaction: (id, inTransaction) => patch(id, { inTransaction }),
 
     setTableFilter: (id, filter) => {
       const table = get().consoles[id]?.table;
@@ -340,6 +407,8 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       const entry = get().consoles[id];
       const index = entry?.results.findIndex((r) => r.id === resultId) ?? -1;
       if (!entry || index < 0) return;
+      const pending = pendingChangesOf(resultId);
+      if (pending > 0 && !(await confirmDiscard(pending))) return;
       if (entry.results[index].status === "running") await get().cancel(id);
 
       const results = entry.results.filter((r) => r.id !== resultId);
@@ -353,7 +422,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       const affected = Object.values(get().consoles).filter(
         (c) => c.dataSourceId === dataSourceId && c.sessionId !== undefined,
       );
-      for (const c of affected) patch(c.id, { sessionId: undefined });
+      for (const c of affected) patch(c.id, { sessionId: undefined, inTransaction: false });
       await Promise.all(affected.map((c) => api.closeSession(c.sessionId!).catch(() => {})));
     },
   };

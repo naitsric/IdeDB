@@ -1,5 +1,5 @@
 import type { IDockviewPanelProps } from "dockview-react";
-import { Play, Square } from "lucide-react";
+import { GitCommitVertical, Play, Square } from "lucide-react";
 import { useEffect, useMemo } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { executeCommand } from "../../commands/registry";
@@ -86,6 +86,15 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
           <StatusDot tone={sessionTone} />
         </div>
         <SchemaSelector consoleId={consoleId} />
+        {entry.inTransaction && (
+          <span
+            className="ml-2 flex shrink-0 items-center gap-1.5 rounded-md bg-warning/15 px-2 py-0.5 text-[11.5px] font-medium text-warning"
+            title="Statements and data editor changes stay uncommitted until you run COMMIT or ROLLBACK"
+          >
+            <GitCommitVertical className="size-3.5" />
+            Transaction open
+          </span>
+        )}
         {entry.connectError && (
           <span className="selectable ml-2 truncate text-[12px] text-danger" title={entry.connectError}>
             {entry.connectError}

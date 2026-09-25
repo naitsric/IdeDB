@@ -27,6 +27,8 @@ export type SchemaLoad =
 
 export interface ExplorerState {
   status: "connecting" | "connected" | "error";
+  /** Identifies one connect attempt, so a session that opens after its entry was dropped is not adopted. */
+  attempt?: number;
   error?: string;
   sessionId?: SessionId;
   server?: ServerInfo;
@@ -61,6 +63,8 @@ const BACKGROUND_CONCURRENCY = 2;
 /** Past this many schemas, the rest load on demand (expanding one, or completing `schema.`). */
 const BACKGROUND_SCHEMA_LIMIT = 100;
 
+let connectAttempts = 0;
+
 /** In-flight introspections, so explorer, completion and background loads share one request. */
 const schemaLoads = new Map<string, Promise<void>>();
 
@@ -71,8 +75,9 @@ const schemaLoads = new Map<string, Promise<void>>();
 const sessionPasswords = new Map<string, string>();
 
 /**
- * Opens a session for a data source, prompting for the password when it is
- * not saved. Resolves to `null` if the user dismisses the prompt.
+ * Opens a session for a data source, prompting for the password when none
+ * is available (not saved, or missing from the Keychain). Resolves to
+ * `null` if the user dismisses the prompt.
  */
 export async function openSessionFor(dataSourceId: string) {
   try {
@@ -84,6 +89,8 @@ export async function openSessionFor(dataSourceId: string) {
     if (password === null) return null;
     const opened = await api.openSession(dataSourceId, password);
     sessionPasswords.set(dataSourceId, password);
+    // A data source that saves its password gets it saved now that it worked.
+    if (source.savePassword) await api.saveDataSource(source, password).catch(() => {});
     return opened;
   }
 }
@@ -154,9 +161,15 @@ export const useDataSources = create<DataSourcesState>((set, get) => {
     connect: async (id) => {
       const existing = get().explorers[id];
       if (existing?.status === "connecting" || existing?.status === "connected") return;
-      set((s) => ({ explorers: { ...s.explorers, [id]: { status: "connecting", models: {} } } }));
+      const attempt = ++connectAttempts;
+      set((s) => ({ explorers: { ...s.explorers, [id]: { status: "connecting", attempt, models: {} } } }));
       try {
         const opened = await openSessionFor(id);
+        // Disconnected, deleted or reconnected while this attempt was opening: nobody wants its session.
+        if (get().explorers[id]?.attempt !== attempt) {
+          if (opened) await api.closeSession(opened.id).catch(() => {});
+          return;
+        }
         if (!opened) {
           set((s) => {
             const { [id]: _, ...rest } = s.explorers;

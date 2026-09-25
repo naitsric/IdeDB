@@ -12,6 +12,7 @@ const column = (name: string, typeName = "int4", primaryKey: number | null = nul
   default: null,
   primaryKey,
   comment: null,
+  generated: false,
 });
 
 const table = (name: string, columns: ColumnInfo[], kind: TableInfo["kind"] = "table"): TableInfo => ({

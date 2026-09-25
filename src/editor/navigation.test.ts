@@ -12,6 +12,7 @@ const column = (name: string): ColumnInfo => ({
   default: null,
   primaryKey: null,
   comment: null,
+  generated: false,
 });
 const table = (name: string, columns: string[]): TableInfo => ({
   name,

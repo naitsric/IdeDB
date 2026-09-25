@@ -6,7 +6,8 @@
 
 use idedb_core::testing::{self, collect, rows};
 use idedb_core::{
-    ColumnInfo, ConnectionParams, Engine, ForeignKey, ObjectKind, QueryEvent, Session, SslMode, Value,
+    ApplyOutcome, ColumnInfo, ColumnValue, ConnectionParams, Engine, ForeignKey, ObjectKind, QueryEvent, RowChange,
+    Session, SslMode, TableRef, Value,
 };
 use idedb_driver_pg::PgSession;
 
@@ -107,7 +108,7 @@ async fn decodes_common_types() {
             text("12345.678"),
             text("héllo"),
             Value::Bytes(vec![0, 255]),
-            text(r#"{"a":1}"#),
+            text(r#"{"a": 1}"#),
             text("00000000-0000-0000-0000-000000000001"),
             text("2026-09-25"),
             text("2026-09-25 10:11:12.500"),
@@ -119,6 +120,74 @@ async fn decodes_common_types() {
             text("NaN"),
         ]
     );
+}
+
+/// JSON comes back exactly as the server stores it: no rounding of big or
+/// precise numbers, and for `json` the original key order and duplicates.
+#[tokio::test]
+async fn keeps_json_exactly() {
+    let Some(mut s) = session().await else { return };
+    let doc = r#"{"id": 12345678901234567890123, "amt": 0.10000000000000000001, "id": 2}"#;
+    let events = collect(&mut s, &format!("select '{doc}'::json, '{doc}'::jsonb"), 10).await;
+    assert_eq!(
+        rows(&events)[0],
+        vec![
+            Value::Text(doc.into()),
+            Value::Text(r#"{"id": 2, "amt": 0.10000000000000000001}"#.into()),
+        ]
+    );
+}
+
+/// Types without a native value decode to the text Postgres prints, and
+/// that text reads back into the type (the data editor casts it).
+#[tokio::test]
+async fn decodes_network_money_time_bit_and_system_types_as_text() {
+    let Some(mut s) = session().await else { return };
+    let values = [
+        ("'127.0.0.1'::inet", "127.0.0.1"),
+        ("'192.168.0.10/24'::inet", "192.168.0.10/24"),
+        ("'2001:db8::1'::inet", "2001:db8::1"),
+        ("'10.0.0.0/8'::cidr", "10.0.0.0/8"),
+        ("'08:00:2b:01:02:03'::macaddr", "08:00:2b:01:02:03"),
+        ("'08:00:2b:01:02:03:04:05'::macaddr8", "08:00:2b:01:02:03:04:05"),
+        ("'-1234.5'::numeric::money", "-1234.50"),
+        ("'10:11:12.5+02'::timetz", "10:11:12.5+02"),
+        ("'04:05:06-03:30'::timetz", "04:05:06-03:30"),
+        ("B'10110'::bit(5)", "10110"),
+        ("B'101'::varbit", "101"),
+        ("'42'::xid", "42"),
+        ("'16/B374D848'::pg_lsn", "16/B374D848"),
+        ("array['10.0.0.1'::inet, null]", "{10.0.0.1,NULL}"),
+    ];
+    for (expr, expected) in values {
+        let events = collect(&mut s, &format!("select {expr}"), 10).await;
+        assert_eq!(rows(&events), vec![vec![Value::Text(expected.into())]], "{expr}");
+    }
+
+    // The displayed text round-trips through the data editor's text cast.
+    run_all(
+        &mut s,
+        &[
+            "drop table if exists idedb_text_types",
+            "create table idedb_text_types (id int primary key, ip inet, mac macaddr, cash money, at timetz, flags bit(5))",
+            "insert into idedb_text_types values (1, null, null, null, null, null)",
+        ],
+    )
+    .await;
+    let table = TableRef { schema: "public".into(), name: "idedb_text_types".into() };
+    let cv = |column: &str, value: &str| ColumnValue { column: column.into(), value: Value::Text(value.into()) };
+    let values = vec![
+        cv("ip", "192.168.0.10/24"),
+        cv("mac", "08:00:2b:01:02:03"),
+        cv("cash", "-1234.50"),
+        cv("at", "04:05:06-03:30"),
+        cv("flags", "10110"),
+    ];
+    let key = vec![ColumnValue { column: "id".into(), value: Value::Int(1) }];
+    let outcome = s.apply(&table, &[RowChange::Update { key, values: values.clone() }]).await.unwrap();
+    let ApplyOutcome::Applied { rows: stored, .. } = outcome else { panic!("{outcome:?}") };
+    let stored = stored[0].clone().unwrap();
+    assert_eq!(stored[1..], values.iter().map(|v| v.value.clone()).collect::<Vec<_>>()[..]);
 }
 
 #[tokio::test]
@@ -154,14 +223,15 @@ async fn introspects_a_schema() {
     assert_eq!(
         orders.columns,
         vec![
-            ColumnInfo { name: "tenant".into(), type_name: "integer".into(), nullable: false, default: None, primary_key: Some(1), comment: None },
-            ColumnInfo { name: "id".into(), type_name: "bigint".into(), nullable: false, default: None, primary_key: Some(2), comment: None },
-            ColumnInfo { name: "note".into(), type_name: "text".into(), nullable: true, default: Some("'n/a'::text".into()), primary_key: None, comment: None },
+            ColumnInfo { name: "tenant".into(), type_name: "integer".into(), nullable: false, default: None, primary_key: Some(1), comment: None, generated: false },
+            ColumnInfo { name: "id".into(), type_name: "bigint".into(), nullable: false, default: None, primary_key: Some(2), comment: None, generated: false },
+            ColumnInfo { name: "note".into(), type_name: "text".into(), nullable: true, default: Some("'n/a'::text".into()), primary_key: None, comment: None, generated: false },
         ]
     );
 
     let lines = &model.tables[0];
     assert_eq!(lines.columns[0].default.as_deref(), Some("nextval('idedb_introspect.lines_id_seq'::regclass)"));
+    assert!(lines.columns[0].generated, "a serial key is generated");
     assert_eq!(
         lines.foreign_keys,
         vec![ForeignKey {
@@ -179,7 +249,7 @@ async fn locates_syntax_errors_in_chars() {
     let Some(mut s) = session().await else { return };
     // Multi-byte text before the error proves the offset is in chars, not bytes.
     let events = collect(&mut s, "select 'ñandú' from from t", 10).await;
-    let Some(QueryEvent::Error { message, position }) = events.last() else { panic!("{events:?}") };
+    let Some(QueryEvent::Error { message, position, .. }) = events.last() else { panic!("{events:?}") };
     assert!(message.contains("syntax error"), "{message}");
     assert_eq!(*position, Some(20), "{message}");
 }
@@ -188,6 +258,126 @@ async fn locates_syntax_errors_in_chars() {
 async fn applies_row_changes() {
     let Some(mut s) = session().await else { return };
     testing::applies_row_changes(&mut s, "public").await;
+}
+
+/// Columns the database fills itself are flagged, so a duplicated row leaves them out.
+#[tokio::test]
+async fn flags_generated_columns() {
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "drop table if exists idedb_generated",
+            "create table idedb_generated (
+                id int generated by default as identity primary key,
+                seq bigserial,
+                total int generated always as (id * 2) stored,
+                plain int default 7,
+                at timestamptz default now())",
+        ],
+    )
+    .await;
+    let model = s.introspect("public").await.unwrap();
+    let table = model.tables.iter().find(|t| t.name == "idedb_generated").unwrap();
+    let flags: Vec<_> = table.columns.iter().map(|c| (c.name.as_str(), c.generated)).collect();
+    assert_eq!(flags, [("id", true), ("seq", true), ("total", true), ("plain", false), ("at", false)]);
+}
+
+#[tokio::test]
+async fn respects_user_transactions() {
+    let Some(mut s) = session().await else { return };
+    testing::respects_user_transactions(&mut s, "public").await;
+}
+
+/// Ends `victim`'s connection from another session, as a server restart or
+/// an idle timeout would.
+async fn terminate(victim: &mut PgSession) {
+    let pid = rows(&collect(victim, "select pg_backend_pid()", 10).await)[0][0].clone();
+    let Value::Int(pid) = pid else { panic!("{pid:?}") };
+    let mut killer = session().await.unwrap();
+    run_all(&mut killer, &[&format!("select pg_terminate_backend({pid}, 5000)")]).await;
+}
+
+fn last_error(events: &[QueryEvent]) -> (&str, bool) {
+    match events.last() {
+        Some(QueryEvent::Error { message, in_transaction, .. }) => (message, *in_transaction),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+/// A lost connection is replaced with the console's search path restored,
+/// and the user is told what was lost; the statement that finds out is not
+/// silently run on the fresh session.
+#[tokio::test]
+async fn reconnects_with_the_search_path() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["create schema if not exists idedb_reconnect"]).await;
+    s.set_schema("idedb_reconnect").await.unwrap();
+    terminate(&mut s).await;
+
+    let events = collect(&mut s, "select 1", 10).await;
+    let (message, in_transaction) = last_error(&events);
+    assert!(message.contains("re-established") && message.contains("`idedb_reconnect`"), "{message}");
+    assert!(!in_transaction);
+    assert_eq!(
+        rows(&collect(&mut s, "select current_schema()", 10).await),
+        vec![vec![Value::Text("idedb_reconnect".into())]]
+    );
+}
+
+#[tokio::test]
+async fn reports_a_transaction_lost_with_the_connection() {
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "drop table if exists idedb_lost_tx",
+            "create table idedb_lost_tx (id int primary key, v int not null)",
+            "insert into idedb_lost_tx values (1, 0)",
+            "begin",
+            "update idedb_lost_tx set v = 1",
+        ],
+    )
+    .await;
+    terminate(&mut s).await;
+
+    let events = collect(&mut s, "commit", 10).await;
+    let (message, in_transaction) = last_error(&events);
+    assert!(message.contains("rolled back"), "{message}");
+    assert!(!in_transaction);
+    assert_eq!(rows(&collect(&mut s, "select v from idedb_lost_tx", 10).await), vec![vec![Value::Int(0)]]);
+}
+
+/// Statements a cursor cannot run still page inside the user's transaction.
+#[tokio::test]
+async fn streams_non_cursor_statements_inside_a_user_transaction() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["drop table if exists idedb_returning", "create table idedb_returning (id int)"]).await;
+    run_all(&mut s, &["begin"]).await;
+    let events = collect(&mut s, "insert into idedb_returning select g from generate_series(1, 5) g returning id", 2).await;
+    assert_eq!(rows(&events).len(), 5, "{events:?}");
+    assert!(matches!(events.last(), Some(QueryEvent::Done { in_transaction: true, .. })), "{events:?}");
+    run_all(&mut s, &["rollback"]).await;
+    let count = rows(&collect(&mut s, "select count(*) from idedb_returning", 10).await);
+    assert_eq!(count, vec![vec![Value::Int(0)]]);
+}
+
+/// The driver asks the server whether a transaction block is open, so it
+/// also knows about blocks it never saw start (a failed COMMIT, `COMMIT AND
+/// CHAIN`) and aborted blocks.
+#[tokio::test]
+async fn reports_the_server_transaction_state() {
+    let Some(mut s) = session().await else { return };
+    let state = async |s: &mut PgSession, sql: &str| match collect(s, sql, 10).await.last() {
+        Some(QueryEvent::Done { in_transaction, .. } | QueryEvent::Error { in_transaction, .. }) => *in_transaction,
+        other => panic!("{sql}: {other:?}"),
+    };
+    assert!(!state(&mut s, "select 1").await);
+    assert!(state(&mut s, "start transaction").await);
+    assert!(state(&mut s, "commit and chain").await);
+    assert!(state(&mut s, "select 1 / 0").await, "an aborted block is still open");
+    assert!(!state(&mut s, "rollback").await);
+    assert!(!state(&mut s, "select 1").await);
 }
 
 async fn run_all(s: &mut PgSession, statements: &[&str]) {
@@ -309,12 +499,12 @@ async fn applies_values_of_any_type() {
         )
         .await
         .unwrap();
-    let ApplyOutcome::Applied { rows } = outcome else { panic!("{outcome:?}") };
+    let ApplyOutcome::Applied { rows, .. } = outcome else { panic!("{outcome:?}") };
     assert_eq!(
         rows[0].as_ref().unwrap()[1..],
         [
             text("12.50"),
-            text(r#"{"a":[true],"b":1}"#),
+            text(r#"{"a": [true], "b": 1}"#),
             text("2026-09-25 10:00:00+00:00"),
             Value::Bytes(vec![0xde, 0xad]),
             text("{1,2}"),

@@ -44,9 +44,10 @@ export function newConsole(sourceId = contextDataSourceId()) {
 /**
  * Opens (or refocuses) the console showing a table's rows and loads them.
  * `where` replaces the filter bar's condition, e.g. to show the row a
- * foreign key points to.
+ * foreign key points to. When the rows being replaced have unsubmitted
+ * edits, the user is asked first, before anything changes.
  */
-export function openTableData(sourceId: string, schema: string, table: string, options: { where?: string } = {}) {
+export async function openTableData(sourceId: string, schema: string, table: string, options: { where?: string } = {}) {
   const explorer = useDataSources.getState().explorers[sourceId];
   const source = useDataSources.getState().sources.find((s) => s.id === sourceId);
   if (!source) return;
@@ -56,9 +57,10 @@ export function openTableData(sourceId: string, schema: string, table: string, o
     (c) => c.dataSourceId === sourceId && c.table?.schema === schema && c.table.name === table,
   );
   const consoleId = existing?.id ?? consoles.create(sourceId, sql, { schema, name: table });
-  if (options.where !== undefined) consoles.setTableFilter(consoleId, { where: options.where });
   showConsole(consoleId);
-  void runTableQuery(consoleId);
+  if (!(await consoles.confirmReplace(consoleId))) return;
+  if (options.where !== undefined) consoles.setTableFilter(consoleId, { where: options.where });
+  await runTableQuery(consoleId, { confirmed: true });
 }
 
 /**
@@ -66,13 +68,16 @@ export function openTableData(sourceId: string, schema: string, table: string, o
  * query itself rather than the editor text, which the user may have changed,
  * and marks the result as the table's data so it can be edited.
  */
-export function runTableQuery(consoleId: string) {
+export function runTableQuery(consoleId: string, options: { confirmed?: boolean } = {}) {
   const entry = useConsoles.getState().consoles[consoleId];
   const table = entry?.table;
   const source = useDataSources.getState().sources.find((s) => s.id === entry?.dataSourceId);
   if (!table || !source) return;
   const sql = tableQuery(source.params.engine, table.schema, table.name, effectiveSchema(entry), table);
-  return useConsoles.getState().runStatement(consoleId, sql, { table: { schema: table.schema, name: table.name } });
+  return useConsoles.getState().runStatement(consoleId, sql, {
+    table: { schema: table.schema, name: table.name },
+    confirmed: options.confirmed,
+  });
 }
 
 /**

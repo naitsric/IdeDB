@@ -153,7 +153,7 @@ export function registerAppCommands(): () => void {
       enabled: () => selection()?.kind === "table" || selection()?.kind === "column",
       run: () => {
         const s = selection();
-        if (s?.kind === "table" || s?.kind === "column") openTableData(s.sourceId, s.schema, s.table);
+        if (s?.kind === "table" || s?.kind === "column") void openTableData(s.sourceId, s.schema, s.table);
       },
     },
     {

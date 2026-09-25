@@ -1,9 +1,9 @@
 import { CompactSelection, type GridSelection, type Rectangle } from "@glideapps/glide-data-grid";
 import { create } from "zustand";
 import type { Engine, TableInfo, TableRef } from "../db/api";
-import { effectiveSchema, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
+import { effectiveSchema, setPendingChangesProbe, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
-import { NO_EDITS, type PendingEdits } from "./edits";
+import { changeCount, NO_EDITS, type PendingEdits } from "./edits";
 
 /**
  * State of the result grids: which one commands act on, their selections,
@@ -57,6 +57,9 @@ export function toggleValueViewer() {
 export function editsOf(resultId: number): PendingEdits {
   return useGrids.getState().edits[resultId] ?? NO_EDITS;
 }
+
+// Lets the consoles store ask before a run replaces a result with pending edits.
+setPendingChangesProbe((resultId) => changeCount(editsOf(resultId)));
 
 export function setEdits(resultId: number, edits: PendingEdits) {
   useGrids.setState((s) => ({
@@ -119,6 +122,8 @@ export function editorTarget(entry: ConsoleState | undefined, result: ResultMeta
   if (info.kind !== "table") return { editable: false, reason: "Read-only: views cannot be edited" };
   if (result.status === "running") return { editable: false, reason: "Rows are still loading" };
   if (result.status === "error") return { editable: false, reason: "Read-only: the query failed" };
+  // Rows shift when a submit lands; edits made meanwhile would point at the wrong rows.
+  if (useGrids.getState().submitting[result.id]) return { editable: false, reason: "Saving changes…" };
 
   const columnNames = result.columns.map((c) => c.name);
   const keys = info.columns

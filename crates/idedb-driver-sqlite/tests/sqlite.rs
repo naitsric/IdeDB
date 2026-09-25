@@ -189,13 +189,18 @@ async fn introspects_tables_views_keys() {
         default: default.map(Into::into),
         primary_key: pk,
         comment: None,
+        generated: false,
     };
 
     let authors = &model.tables[0];
     assert_eq!(authors.kind, ObjectKind::Table);
     assert_eq!(
         authors.columns,
-        [column("id", "integer", true, None, Some(1)), column("name", "text", false, Some("'anon'"), None)]
+        // A lone INTEGER PRIMARY KEY is the rowid: SQLite assigns it.
+        [
+            ColumnInfo { generated: true, ..column("id", "integer", true, None, Some(1)) },
+            column("name", "text", false, Some("'anon'"), None)
+        ]
     );
 
     let books = &model.tables[1];
@@ -253,7 +258,7 @@ async fn locates_syntax_errors_in_chars() {
     let (_dir, mut s) = session().await;
     // Multi-byte text before the error proves the offset is in chars, not bytes.
     let events = collect(&mut s, "select 'ñandú' from from t", 10).await;
-    let Some(QueryEvent::Error { message, position }) = events.last() else { panic!("{events:?}") };
+    let Some(QueryEvent::Error { message, position, .. }) = events.last() else { panic!("{events:?}") };
     assert!(message.contains("syntax error"), "{message}");
     assert!(!message.contains("select"), "message echoes the SQL: {message}");
     assert_eq!(*position, Some(20), "{message}");
@@ -263,6 +268,28 @@ async fn locates_syntax_errors_in_chars() {
 async fn applies_row_changes() {
     let (_dir, mut s) = session().await;
     testing::applies_row_changes(&mut s, "main").await;
+}
+
+/// Generated columns are flagged; a key is the rowid only in a rowid table.
+#[tokio::test]
+async fn flags_generated_columns() {
+    let (_dir, mut s) = session().await;
+    run(&mut s, "create table g (id integer primary key, v int, twice int generated always as (v * 2) stored)").await;
+    run(&mut s, "create table w (id integer primary key, v int) without rowid").await;
+    let model = s.introspect("main").await.unwrap();
+    let flags = |table: &str| -> Vec<(String, bool)> {
+        let t = model.tables.iter().find(|t| t.name == table).unwrap();
+        t.columns.iter().map(|c| (c.name.clone(), c.generated)).collect()
+    };
+    let f = |n: &str, g: bool| (n.to_owned(), g);
+    assert_eq!(flags("g"), [f("id", true), f("v", false), f("twice", true)]);
+    assert_eq!(flags("w"), [f("id", false), f("v", false)]);
+}
+
+#[tokio::test]
+async fn respects_user_transactions() {
+    let (_dir, mut s) = session().await;
+    testing::respects_user_transactions(&mut s, "main").await;
 }
 
 #[tokio::test]

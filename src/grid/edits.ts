@@ -124,6 +124,18 @@ export function duplicateRows(
   return { ...edits, inserted: [...edits.inserted, ...copies] };
 }
 
+/**
+ * Result columns the database fills itself (identity, auto-increment,
+ * serial, computed, SQLite's rowid), which a duplicated row leaves unset.
+ */
+export function generatedColumns(
+  columnNames: readonly string[],
+  tableColumns: readonly { name: string; generated: boolean }[],
+): Set<number> {
+  const generated = new Set(tableColumns.filter((c) => c.generated).map((c) => c.name));
+  return new Set(columnNames.flatMap((name, col) => (generated.has(name) ? [col] : [])));
+}
+
 /** Marks loaded rows deleted; inserted rows are simply dropped. */
 export function deleteRows(edits: PendingEdits, rowCount: number, rows: readonly number[]): PendingEdits {
   const deleted = new Set(edits.deleted);
@@ -189,6 +201,32 @@ export function toChanges(
     targets.push({ kind: "insert", index });
   });
   return { changes, targets };
+}
+
+/**
+ * The edits still pending once `submitted` has been written: whatever was
+ * changed while the submit ran. Loaded rows shift the way `commitRows`
+ * shifts them (submitted deletions removed, submitted inserts appended to
+ * the loaded rows), so row indexes are remapped. Edits made meanwhile to a
+ * row that was just inserted are not kept: that row is loaded data now.
+ */
+export function afterSubmit(current: PendingEdits, submitted: PendingEdits, rowCount: number): PendingEdits {
+  if (current === submitted) return NO_EDITS;
+  const removed = [...submitted.deleted].filter((row) => row < rowCount).sort((a, b) => a - b);
+  const remap = (row: number) => row - removed.filter((r) => r < row).length;
+
+  const updates: Record<number, Readonly<Record<number, Value>>> = {};
+  for (const [rowKey, cols] of Object.entries(current.updates)) {
+    const row = Number(rowKey);
+    if (submitted.deleted.has(row)) continue;
+    const written = submitted.updates[row] ?? {};
+    const left = Object.fromEntries(
+      Object.entries(cols).filter(([col, value]) => !(col in written && editText(written[Number(col)]) === editText(value))),
+    );
+    if (Object.keys(left).length > 0) updates[remap(row)] = left;
+  }
+  const deleted = new Set([...current.deleted].filter((row) => !submitted.deleted.has(row)).map(remap));
+  return { updates, deleted, inserted: current.inserted.slice(submitted.inserted.length) };
 }
 
 /**

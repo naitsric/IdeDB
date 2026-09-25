@@ -286,10 +286,14 @@ async fn introspects_schemas_tables_and_keys() {
     let child = table("idedb_intro_child");
     assert_eq!(child.columns[0].type_name, "bigint unsigned");
     assert_eq!(child.columns[0].primary_key, Some(1));
+    assert!(child.columns[0].generated, "an auto_increment key is generated");
     assert_eq!(
         child.columns[3].default.as_deref(),
         Some("CURRENT_TIMESTAMP")
     );
+    // DEFAULT_GENERATED only means an expression default: a copy keeps it.
+    assert!(!child.columns[3].generated);
+    assert!(!parent.columns.iter().any(|c| c.generated));
     assert_eq!(child.foreign_keys.len(), 1);
     let fk = &child.foreign_keys[0];
     assert_eq!(fk.name, "fk_child_parent");
@@ -340,9 +344,116 @@ async fn reads_back_auto_increment_inserts() {
             rows: vec![
                 Some(vec![Value::Int(1), text("first"), text("2026-01-01"), text("1.50")]),
                 Some(vec![Value::Int(2), text("second"), text("2026-01-01"), text("1.50")]),
-            ]
+            ],
+            in_transaction: false,
         }
     );
+}
+
+#[tokio::test]
+async fn respects_user_transactions() {
+    let Some(mut s) = session().await else { return };
+    testing::respects_user_transactions(&mut s, "idedb").await;
+}
+
+/// Ends `victim`'s connection from another session, as a server restart or
+/// an idle timeout would.
+async fn kill_connection(victim: &mut MySqlSession) {
+    let Some(mut killer) = session().await else { unreachable!() };
+    let id = rows(&collect(victim, "select connection_id()", 10).await)[0][0].clone();
+    let Value::Int(id) = id else { panic!("{id:?}") };
+    run_all(&mut killer, &[&format!("kill {id}")]).await;
+}
+
+fn last_error(events: &[QueryEvent]) -> (&str, bool) {
+    match events.last() {
+        Some(QueryEvent::Error { message, in_transaction, .. }) => (message, *in_transaction),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+/// A lost connection comes back on the database the user had switched to,
+/// and the user is told session state was reset.
+#[tokio::test]
+async fn reconnects_to_the_current_database() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["use information_schema"]).await;
+    kill_connection(&mut s).await;
+
+    let events = collect(&mut s, "select 1", 10).await;
+    let (message, in_transaction) = last_error(&events);
+    assert!(message.contains("re-established") && message.contains("`information_schema`"), "{message}");
+    assert!(!in_transaction);
+    // Now the session works again, on the same database.
+    let database = rows(&collect(&mut s, "select database()", 10).await);
+    assert_eq!(database, vec![vec![Value::Text("information_schema".into())]]);
+}
+
+/// A transaction the lost connection took along is reported as rolled back,
+/// never silently replaced, and data editor changes are not saved on their own.
+#[tokio::test]
+async fn reports_a_transaction_lost_with_the_connection() {
+    use idedb_core::{ColumnValue, RowChange, TableRef};
+
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "drop table if exists idedb_lost_tx",
+            "create table idedb_lost_tx (id int primary key, v int not null)",
+            "insert into idedb_lost_tx values (1, 0)",
+            "begin",
+            "update idedb_lost_tx set v = 1",
+        ],
+    )
+    .await;
+    kill_connection(&mut s).await;
+
+    let events = collect(&mut s, "commit", 10).await;
+    let (message, in_transaction) = last_error(&events);
+    assert!(message.contains("rolled back"), "{message}");
+    assert!(!in_transaction);
+    assert_eq!(rows(&collect(&mut s, "select v from idedb_lost_tx", 10).await), vec![vec![Value::Int(0)]]);
+
+    // Data editor changes meant for a lost transaction are not committed on
+    // their own: the submit that finds the connection gone fails, and so
+    // does the one that reconnects, saying what was lost.
+    run_all(&mut s, &["begin"]).await;
+    kill_connection(&mut s).await;
+    let table = TableRef { schema: "idedb".into(), name: "idedb_lost_tx".into() };
+    let cv = |c: &str, v: i64| ColumnValue { column: c.into(), value: Value::Int(v) };
+    let change = [RowChange::Update { key: vec![cv("id", 1)], values: vec![cv("v", 2)] }];
+    assert!(s.apply(&table, &change).await.is_err());
+    let refused = s.apply(&table, &change).await.expect_err("reconnecting must not save");
+    assert!(refused.to_string().contains("rolled back") && refused.to_string().contains("Nothing was saved"), "{refused}");
+    assert_eq!(rows(&collect(&mut s, "select v from idedb_lost_tx", 10).await), vec![vec![Value::Int(0)]]);
+}
+
+/// With autocommit off every statement is part of an open transaction, so
+/// the data editor must not commit it either.
+#[tokio::test]
+async fn treats_autocommit_off_as_an_open_transaction() {
+    use idedb_core::{ApplyOutcome, ColumnValue, RowChange, TableRef};
+
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "drop table if exists idedb_autocommit",
+            "create table idedb_autocommit (id int primary key, v int not null)",
+            "insert into idedb_autocommit values (1, 0)",
+        ],
+    )
+    .await;
+    let events = collect(&mut s, "set autocommit = 0", 10).await;
+    assert!(matches!(events.last(), Some(QueryEvent::Done { in_transaction: true, .. })), "{events:?}");
+
+    let table = TableRef { schema: "idedb".into(), name: "idedb_autocommit".into() };
+    let cv = |column: &str, v: i64| ColumnValue { column: column.into(), value: Value::Int(v) };
+    let outcome = s.apply(&table, &[RowChange::Update { key: vec![cv("id", 1)], values: vec![cv("v", 1)] }]).await.unwrap();
+    assert!(matches!(outcome, ApplyOutcome::Applied { in_transaction: true, .. }), "{outcome:?}");
+    run_all(&mut s, &["rollback", "set autocommit = 1"]).await;
+    assert_eq!(rows(&collect(&mut s, "select v from idedb_autocommit", 10).await), vec![vec![Value::Int(0)]]);
 }
 
 #[tokio::test]

@@ -1,6 +1,9 @@
-//! Data editor changes: parameterized DML inside one transaction, with
+//! Data editor changes: parameterized DML applied as one unit, with
 //! `RETURNING *` so the editor shows what was actually stored (type affinity
 //! may convert what the user typed).
+//!
+//! Outside a transaction the batch runs in one of its own; inside one the
+//! user opened, in a savepoint that is released without committing.
 
 use std::fmt::Write as _;
 
@@ -10,21 +13,29 @@ use rusqlite::{Connection, params_from_iter};
 
 use crate::{quote, value};
 
-pub(crate) fn apply(conn: &mut Connection, table: &TableRef, changes: &[RowChange]) -> rusqlite::Result<ApplyOutcome> {
+pub(crate) fn apply(conn: &Connection, table: &TableRef, changes: &[RowChange]) -> rusqlite::Result<ApplyOutcome> {
     let target = format!("{}.{}", quote(&table.schema), quote(&table.name));
-    let tx = conn.transaction()?;
+    // Outside BEGIN, SQLite runs in autocommit mode.
+    let inside = !conn.is_autocommit();
+    let (start, undo, finish) = if inside {
+        ("savepoint idedb_apply", "rollback to idedb_apply; release idedb_apply", "release idedb_apply")
+    } else {
+        ("begin", "rollback", "commit")
+    };
+
+    conn.execute_batch(start)?;
     let mut rows = Vec::with_capacity(changes.len());
     for (index, change) in changes.iter().enumerate() {
-        match apply_one(&tx, &target, change) {
+        match apply_one(conn, &target, change) {
             Ok(row) => rows.push(row),
             Err(message) => {
-                tx.rollback()?;
+                conn.execute_batch(undo)?;
                 return Ok(ApplyOutcome::Failed { index, message });
             }
         }
     }
-    tx.commit()?;
-    Ok(ApplyOutcome::Applied { rows })
+    conn.execute_batch(finish)?;
+    Ok(ApplyOutcome::Applied { rows, in_transaction: inside })
 }
 
 fn apply_one(conn: &Connection, target: &str, change: &RowChange) -> Result<Option<Row>, String> {

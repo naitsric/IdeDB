@@ -33,9 +33,65 @@ pnpm test:rust    # unit tests + driver conformance tests against the Docker dat
 pnpm typecheck
 ```
 
+## CI
+
+`.github/workflows/ci.yml` runs on every pull request and every push to
+`main`:
+
+- **Frontend:** `tsc --noEmit`, `pnpm test`, `pnpm build`.
+- **Rust:** `cargo clippy --workspace --all-targets -- -D warnings` and
+  `pnpm test:rust` against Postgres 17 and MySQL 8.4 service containers
+  (same credentials and ports as `docker-compose.yml`). The job fails if the
+  database tests skip themselves.
+
+CI runs on Linux only: while the repository is private, macOS runner minutes
+count 10x against the Actions quota. The Keychain integration is macOS-only
+and compiled out there.
+
+## Releasing
+
+Releases are cut by hand from `main` with the **Release** workflow, from
+Actions → Release → Run workflow, or:
+
+```sh
+gh workflow run release.yml -f bump=minor
+gh workflow run release.yml -f bump=patch -f dry_run=true   # build only
+```
+
+| Input     | Default   | Meaning                                                                 |
+| --------- | --------- | ----------------------------------------------------------------------- |
+| `bump`    | `patch`   | `patch`, `minor` or `major`                                             |
+| `target`  | `aarch64` | `aarch64` (Apple Silicon) or `universal` (adds Intel, builds longer)    |
+| `draft`   | `true`    | publish the GitHub Release as a draft                                   |
+| `dry_run` | `false`   | only build and attach the bundle to the workflow run: no commit, tag or release |
+
+The workflow bumps the version with `scripts/release-version.mjs`
+(`package.json` is the source of truth; `tauri.conf.json` reads it and the
+Cargo workspace version follows), commits `Release vX.Y.Z` to `main`, tags
+it, builds `IdeDB.app` and a `.dmg` on macOS, and publishes both in a GitHub
+Release with generated notes. If `main` is protected against direct pushes,
+allow `github-actions[bot]` to push or the prepare job will fail.
+
+**Code signing.** Until the Apple secrets exist, builds are ad-hoc signed and
+not notarized, so macOS blocks them after download; testers run
+`xattr -dr com.apple.quarantine /Applications/IdeDB.app` once. Signing turns
+on by itself when these repository secrets are set:
+
+- `APPLE_CERTIFICATE` (base64 of the Developer ID Application `.p12`),
+  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`: signing.
+- `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`:
+  notarization.
+
+A release build uses the macOS runner for roughly 10–20 minutes (`universal`
+takes longer), which counts 10x while the repository is private. Auto-updates
+are not wired yet: release assets of a private repository cannot be
+downloaded without authentication.
+
 ## Layout
 
 ```
+.github/workflows/   CI (Linux) and the manual Release workflow (macOS)
+scripts/             release-version.mjs: version bump across package.json and Cargo
 src/                 React UI
   commands/          command registry, keymap, app commands, Search Everywhere
   actions.ts         user-level actions shared by commands, menus and search

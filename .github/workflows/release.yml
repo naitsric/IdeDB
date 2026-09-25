@@ -1,0 +1,209 @@
+# Cuts a release by hand: Actions → Release → Run workflow, or
+#   gh workflow run release.yml -f bump=minor
+#
+# 1. prepare (Linux): bumps the version (scripts/release-version.mjs),
+#    commits "Release vX.Y.Z" to main and tags it.
+# 2. build (macOS): bundles the tag into IdeDB.app and a .dmg and publishes
+#    them as a GitHub Release.
+#
+# Code signing and notarization turn on by themselves once the APPLE_*
+# secrets exist; until then the app is ad-hoc signed and not notarized.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      target:
+        description: aarch64 (Apple Silicon) or universal (adds Intel, takes longer)
+        type: choice
+        options: [aarch64, universal]
+        default: aarch64
+      draft:
+        description: Publish the GitHub Release as a draft
+        type: boolean
+        default: true
+      dry_run:
+        description: Only build; upload the bundle as a workflow artifact without committing, tagging or releasing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - name: Only from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases are cut from main; this run is on ${GITHUB_REF}."
+          exit 1
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Bump version
+        id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: node scripts/release-version.mjs "$BUMP"
+      - name: Refuse an existing tag
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::Tag v${VERSION} already exists"
+            exit 1
+          fi
+      - name: Commit and tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release v${VERSION}"
+          git tag -a "v${VERSION}" -m "IdeDB v${VERSION}"
+          git push origin HEAD:refs/heads/main
+          git push origin "v${VERSION}"
+      - name: Ref to build
+        id: ref
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=v${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Bundle (macOS)
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RUST_TARGET: ${{ inputs.target == 'universal' && 'universal-apple-darwin' || 'aarch64-apple-darwin' }}
+      ARCH_LABEL: ${{ inputs.target == 'universal' && 'universal' || 'aarch64' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      # A dry run builds main as it is, so apply the would-be version locally.
+      - name: Apply version (dry run)
+        if: ${{ inputs.dry_run }}
+        run: node scripts/release-version.mjs "$VERSION"
+      - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.target == 'universal' && 'aarch64-apple-darwin,x86_64-apple-darwin' || 'aarch64-apple-darwin' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.RUST_TARGET }}
+
+      # Only non-empty values are exported: an empty APPLE_* variable would
+      # make the bundler try to sign or notarize with it.
+      - name: Configure code signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "::warning::No APPLE_CERTIFICATE secret: building an ad-hoc signed, unnotarized app"
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required when APPLE_CERTIFICATE is set"
+              exit 1
+            fi
+          done
+          notarize=0
+          for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!name}" ] && notarize=$((notarize + 1))
+          done
+          if [ "$notarize" -ne 0 ] && [ "$notarize" -ne 3 ]; then
+            echo "::error::Notarization needs all of APPLE_ID, APPLE_PASSWORD and APPLE_TEAM_ID"
+            exit 1
+          fi
+          [ "$notarize" -eq 0 ] && echo "::warning::Signing without notarization (APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID not set)"
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!name}" ]; then
+              { echo "$name<<__IDEDB_EOF__"; echo "${!name}"; echo "__IDEDB_EOF__"; } >> "$GITHUB_ENV"
+            fi
+          done
+
+      - name: Build
+        run: pnpm tauri build --target "$RUST_TARGET" --bundles app,dmg
+
+      - name: Collect artifacts
+        run: |
+          bundle="target/${RUST_TARGET}/release/bundle"
+          mkdir -p dist-release
+          cp "$bundle"/dmg/*.dmg "dist-release/IdeDB_${VERSION}_${ARCH_LABEL}.dmg"
+          tar -czf "dist-release/IdeDB_${VERSION}_${ARCH_LABEL}.app.tar.gz" -C "$bundle/macos" IdeDB.app
+          ls -lh dist-release
+
+      - name: Upload bundle (dry run)
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: IdeDB_${{ env.VERSION }}_${{ env.ARCH_LABEL }}
+          path: dist-release/*
+          retention-days: 7
+
+      - name: Publish GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          tag="v${VERSION}"
+          {
+            if [ "$APPLE_SIGNING_IDENTITY" = "-" ]; then
+              echo "> **Unsigned build.** macOS will refuse to open it until you remove the quarantine flag:"
+              echo "> \`xattr -dr com.apple.quarantine /Applications/IdeDB.app\`"
+              echo
+            fi
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" -f tag_name="$tag" --jq .body
+          } > release-notes.md
+          draft_flag=()
+          [ "$DRAFT" = "true" ] && draft_flag=(--draft)
+          gh release create "$tag" dist-release/* \
+            --title "IdeDB ${VERSION}" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            "${draft_flag[@]}"

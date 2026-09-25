@@ -6,7 +6,8 @@
 
 use idedb_core::testing::{self, collect, rows};
 use idedb_core::{
-    ColumnInfo, ConnectionParams, Engine, ForeignKey, ObjectKind, QueryEvent, Session, SslMode, Value,
+    ApplyOutcome, ColumnInfo, ColumnValue, ConnectionParams, Engine, ForeignKey, ObjectKind, QueryEvent, RowChange,
+    Session, SslMode, TableRef, Value,
 };
 use idedb_driver_pg::PgSession;
 
@@ -107,7 +108,7 @@ async fn decodes_common_types() {
             text("12345.678"),
             text("héllo"),
             Value::Bytes(vec![0, 255]),
-            text(r#"{"a":1}"#),
+            text(r#"{"a": 1}"#),
             text("00000000-0000-0000-0000-000000000001"),
             text("2026-09-25"),
             text("2026-09-25 10:11:12.500"),
@@ -119,6 +120,74 @@ async fn decodes_common_types() {
             text("NaN"),
         ]
     );
+}
+
+/// JSON comes back exactly as the server stores it: no rounding of big or
+/// precise numbers, and for `json` the original key order and duplicates.
+#[tokio::test]
+async fn keeps_json_exactly() {
+    let Some(mut s) = session().await else { return };
+    let doc = r#"{"id": 12345678901234567890123, "amt": 0.10000000000000000001, "id": 2}"#;
+    let events = collect(&mut s, &format!("select '{doc}'::json, '{doc}'::jsonb"), 10).await;
+    assert_eq!(
+        rows(&events)[0],
+        vec![
+            Value::Text(doc.into()),
+            Value::Text(r#"{"id": 2, "amt": 0.10000000000000000001}"#.into()),
+        ]
+    );
+}
+
+/// Types without a native value decode to the text Postgres prints, and
+/// that text reads back into the type (the data editor casts it).
+#[tokio::test]
+async fn decodes_network_money_time_bit_and_system_types_as_text() {
+    let Some(mut s) = session().await else { return };
+    let values = [
+        ("'127.0.0.1'::inet", "127.0.0.1"),
+        ("'192.168.0.10/24'::inet", "192.168.0.10/24"),
+        ("'2001:db8::1'::inet", "2001:db8::1"),
+        ("'10.0.0.0/8'::cidr", "10.0.0.0/8"),
+        ("'08:00:2b:01:02:03'::macaddr", "08:00:2b:01:02:03"),
+        ("'08:00:2b:01:02:03:04:05'::macaddr8", "08:00:2b:01:02:03:04:05"),
+        ("'-1234.5'::numeric::money", "-1234.50"),
+        ("'10:11:12.5+02'::timetz", "10:11:12.5+02"),
+        ("'04:05:06-03:30'::timetz", "04:05:06-03:30"),
+        ("B'10110'::bit(5)", "10110"),
+        ("B'101'::varbit", "101"),
+        ("'42'::xid", "42"),
+        ("'16/B374D848'::pg_lsn", "16/B374D848"),
+        ("array['10.0.0.1'::inet, null]", "{10.0.0.1,NULL}"),
+    ];
+    for (expr, expected) in values {
+        let events = collect(&mut s, &format!("select {expr}"), 10).await;
+        assert_eq!(rows(&events), vec![vec![Value::Text(expected.into())]], "{expr}");
+    }
+
+    // The displayed text round-trips through the data editor's text cast.
+    run_all(
+        &mut s,
+        &[
+            "drop table if exists idedb_text_types",
+            "create table idedb_text_types (id int primary key, ip inet, mac macaddr, cash money, at timetz, flags bit(5))",
+            "insert into idedb_text_types values (1, null, null, null, null, null)",
+        ],
+    )
+    .await;
+    let table = TableRef { schema: "public".into(), name: "idedb_text_types".into() };
+    let cv = |column: &str, value: &str| ColumnValue { column: column.into(), value: Value::Text(value.into()) };
+    let values = vec![
+        cv("ip", "192.168.0.10/24"),
+        cv("mac", "08:00:2b:01:02:03"),
+        cv("cash", "-1234.50"),
+        cv("at", "04:05:06-03:30"),
+        cv("flags", "10110"),
+    ];
+    let key = vec![ColumnValue { column: "id".into(), value: Value::Int(1) }];
+    let outcome = s.apply(&table, &[RowChange::Update { key, values: values.clone() }]).await.unwrap();
+    let ApplyOutcome::Applied { rows: stored, .. } = outcome else { panic!("{outcome:?}") };
+    let stored = stored[0].clone().unwrap();
+    assert_eq!(stored[1..], values.iter().map(|v| v.value.clone()).collect::<Vec<_>>()[..]);
 }
 
 #[tokio::test]
@@ -435,7 +504,7 @@ async fn applies_values_of_any_type() {
         rows[0].as_ref().unwrap()[1..],
         [
             text("12.50"),
-            text(r#"{"a":[true],"b":1}"#),
+            text(r#"{"a": [true], "b": 1}"#),
             text("2026-09-25 10:00:00+00:00"),
             Value::Bytes(vec![0xde, 0xad]),
             text("{1,2}"),

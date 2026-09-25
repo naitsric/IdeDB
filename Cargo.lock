@@ -1678,7 +1678,6 @@ dependencies = [
  "native-tls",
  "postgres-native-tls",
  "postgres-protocol",
- "serde_json",
  "tokio",
  "tokio-postgres",
  "uuid",

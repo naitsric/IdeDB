@@ -46,13 +46,24 @@ fn decode(ty: &Type, raw: &[u8]) -> Result<Value, BoxError> {
         Type::FLOAT8 => Value::Float(f64::from_sql(ty, raw)?),
         Type::NUMERIC => Value::Text(numeric_to_string(raw)?),
         Type::BYTEA => Value::Bytes(raw.to_vec()),
-        Type::JSON | Type::JSONB => Value::Text(serde_json::Value::from_sql(ty, raw)?.to_string()),
+        // The server's own text, never re-serialized: parsing would round
+        // big or precise numbers (and, for json, reorder keys and drop
+        // duplicates), and an edit would write the rounded value back.
+        Type::JSON => Value::Text(std::str::from_utf8(raw)?.to_owned()),
+        Type::JSONB => Value::Text(jsonb_to_string(raw)?),
         Type::UUID => Value::Text(uuid::Uuid::from_sql(ty, raw)?.to_string()),
         Type::DATE => Value::Text(NaiveDate::from_sql(ty, raw)?.to_string()),
         Type::TIME => Value::Text(NaiveTime::from_sql(ty, raw)?.to_string()),
+        Type::TIMETZ => Value::Text(timetz_to_string(raw)?),
         Type::TIMESTAMP => Value::Text(timestamp_to_string(ty, raw)?),
         Type::TIMESTAMPTZ => Value::Text(timestamptz_to_string(ty, raw)?),
         Type::INTERVAL => Value::Text(interval_to_string(raw)?),
+        Type::INET | Type::CIDR => Value::Text(inet_to_string(raw)?),
+        Type::MACADDR | Type::MACADDR8 => Value::Text(macaddr_to_string(raw)?),
+        Type::MONEY => Value::Text(money_to_string(raw)?),
+        Type::BIT | Type::VARBIT => Value::Text(bits_to_string(raw)?),
+        Type::XID => Value::Text(u32::from_be_bytes(raw.try_into()?).to_string()),
+        Type::PG_LSN => Value::Text(lsn_to_string(raw)?),
         _ => match ty.kind() {
             Kind::Domain(inner) => decode(inner, raw)?,
             Kind::Array(element) => Value::Text(array_to_string(element, raw)?),
@@ -70,6 +81,91 @@ fn is_textual(ty: &Type) -> bool {
         *ty,
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN | Type::XML
     ) || matches!(ty.name(), "citext" | "ltree" | "lquery")
+}
+
+/// jsonb's binary format is a version byte (1) followed by the text.
+fn jsonb_to_string(raw: &[u8]) -> Result<String, BoxError> {
+    match raw.split_first() {
+        Some((1, text)) => Ok(std::str::from_utf8(text)?.to_owned()),
+        _ => Err("unsupported jsonb version".into()),
+    }
+}
+
+/// Microseconds since midnight, then the zone offset in seconds west of UTC;
+/// printed as Postgres does, e.g. `10:11:12.5+02` or `04:05:06-03:30`.
+pub(crate) fn timetz_to_string(raw: &[u8]) -> Result<String, BoxError> {
+    if raw.len() != 12 {
+        return Err("invalid timetz length".into());
+    }
+    let micros = i64::from_be_bytes(raw[0..8].try_into()?);
+    let west = i32::from_be_bytes(raw[8..12].try_into()?);
+    let mut out = clock(micros.unsigned_abs());
+    let east = -west;
+    let (sign, off) = (if east < 0 { '-' } else { '+' }, east.unsigned_abs());
+    write!(out, "{sign}{:02}", off / 3600)?;
+    if off % 3600 != 0 {
+        write!(out, ":{:02}", off / 60 % 60)?;
+        if off % 60 != 0 {
+            write!(out, ":{:02}", off % 60)?;
+        }
+    }
+    Ok(out)
+}
+
+/// `HH:MM:SS` plus the fraction without trailing zeros.
+fn clock(micros: u64) -> String {
+    let (h, m, s, frac) = (micros / 3_600_000_000, micros / 60_000_000 % 60, micros / 1_000_000 % 60, micros % 1_000_000);
+    let mut out = format!("{h:02}:{m:02}:{s:02}");
+    if frac != 0 {
+        let _ = write!(out, ".{}", format!("{frac:06}").trim_end_matches('0'));
+    }
+    out
+}
+
+/// Family, prefix bits, is-cidr flag, address length, address. Like
+/// Postgres, `inet` leaves out a full-length prefix; `cidr` always shows it.
+pub(crate) fn inet_to_string(raw: &[u8]) -> Result<String, BoxError> {
+    let [family, bits, is_cidr, len, addr @ ..] = raw else { return Err("invalid inet".into()) };
+    let address: std::net::IpAddr = match (family, usize::from(*len), addr.len()) {
+        (2, 4, 4) => std::net::Ipv4Addr::from(<[u8; 4]>::try_from(addr)?).into(),
+        (3, 16, 16) => std::net::Ipv6Addr::from(<[u8; 16]>::try_from(addr)?).into(),
+        _ => return Err("invalid inet address".into()),
+    };
+    let full = if address.is_ipv4() { 32 } else { 128 };
+    Ok(if *is_cidr == 0 && *bits == full { address.to_string() } else { format!("{address}/{bits}") })
+}
+
+pub(crate) fn macaddr_to_string(raw: &[u8]) -> Result<String, BoxError> {
+    if raw.len() != 6 && raw.len() != 8 {
+        return Err("invalid macaddr length".into());
+    }
+    Ok(raw.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":"))
+}
+
+/// Cents as a plain decimal. The server's own text depends on its
+/// `lc_monetary`, which a client cannot reproduce; a plain number reads
+/// back into `money` under any locale.
+pub(crate) fn money_to_string(raw: &[u8]) -> Result<String, BoxError> {
+    let cents = i64::from_be_bytes(raw.try_into()?);
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    Ok(format!("{sign}{}.{:02}", abs / 100, abs % 100))
+}
+
+/// Bit count, then the bits packed most significant first.
+pub(crate) fn bits_to_string(raw: &[u8]) -> Result<String, BoxError> {
+    let count = usize::try_from(i32::from_be_bytes(raw.get(..4).ok_or("invalid bit")?.try_into()?))?;
+    let bytes = &raw[4..];
+    if bytes.len() * 8 < count {
+        return Err("invalid bit length".into());
+    }
+    Ok((0..count).map(|i| if bytes[i / 8] & (0x80 >> (i % 8)) != 0 { '1' } else { '0' }).collect())
+}
+
+/// A 64-bit WAL position, printed as `hi/lo` in hex like Postgres.
+pub(crate) fn lsn_to_string(raw: &[u8]) -> Result<String, BoxError> {
+    let lsn = u64::from_be_bytes(raw.try_into()?);
+    Ok(format!("{:X}/{:X}", lsn >> 32, lsn & 0xffff_ffff))
 }
 
 fn timestamp_to_string(ty: &Type, raw: &[u8]) -> Result<String, BoxError> {

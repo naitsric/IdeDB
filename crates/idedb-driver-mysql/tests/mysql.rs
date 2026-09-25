@@ -286,10 +286,14 @@ async fn introspects_schemas_tables_and_keys() {
     let child = table("idedb_intro_child");
     assert_eq!(child.columns[0].type_name, "bigint unsigned");
     assert_eq!(child.columns[0].primary_key, Some(1));
+    assert!(child.columns[0].generated, "an auto_increment key is generated");
     assert_eq!(
         child.columns[3].default.as_deref(),
         Some("CURRENT_TIMESTAMP")
     );
+    // DEFAULT_GENERATED only means an expression default: a copy keeps it.
+    assert!(!child.columns[3].generated);
+    assert!(!parent.columns.iter().any(|c| c.generated));
     assert_eq!(child.foreign_keys.len(), 1);
     let fk = &child.foreign_keys[0];
     assert_eq!(fk.name, "fk_child_parent");

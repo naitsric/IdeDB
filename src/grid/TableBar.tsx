@@ -1,4 +1,3 @@
-import { ask } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, Minus, PanelRight, Plus, Undo2 } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { runTableQuery } from "../actions";
@@ -6,7 +5,7 @@ import { executeCommand } from "../commands/registry";
 import { useConsoles, type ResultMeta } from "../db/consoles";
 import { IconButton, cx } from "../ui/primitives";
 import { filterInputs } from "./actions";
-import { editsOf, useGrids, type EditorTarget } from "./dataEditor";
+import { useGrids, type EditorTarget } from "./dataEditor";
 import { changeCount, NO_EDITS } from "./edits";
 
 /**
@@ -30,16 +29,10 @@ export function TableBar({
 
   /** Reruns the table query with the filters, after confirming pending edits may be dropped. */
   const apply = async (filter: { where?: string; orderBy?: string }) => {
-    if (changeCount(editsOf(result.id)) > 0) {
-      const discard = await ask("Reloading the rows discards the changes you have not submitted.", {
-        title: "Discard pending changes?",
-        kind: "warning",
-        okLabel: "Discard and reload",
-      });
-      if (!discard) return false;
-    }
-    useConsoles.getState().setTableFilter(consoleId, filter);
-    void runTableQuery(consoleId);
+    const consoles = useConsoles.getState();
+    if (!(await consoles.confirmReplace(consoleId))) return false;
+    consoles.setTableFilter(consoleId, filter);
+    void runTableQuery(consoleId, { confirmed: true });
     return true;
   };
 

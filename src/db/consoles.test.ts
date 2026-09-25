@@ -19,12 +19,16 @@ vi.mock("./api", async (importOriginal) => ({
   },
 }));
 
+/** The native "Discard N pending changes?" dialog. */
+const ask = vi.fn(async () => true);
+vi.mock("@tauri-apps/plugin-dialog", () => ({ ask }));
+
 vi.mock("./dataSources", () => ({
   openSessionFor: vi.fn(async () => ({ id: 7, server: { engine: "postgres", version: "17", defaultSchema: "public" } })),
   useDataSources: { getState: () => ({ connect: vi.fn() }) },
 }));
 
-const { activeResult, rowGetter, useConsoles } = await import("./consoles");
+const { activeResult, rowGetter, setPendingChangesProbe, useConsoles } = await import("./consoles");
 
 const rows = (sql: string, values: number[]) =>
   replies.set(sql, [
@@ -39,7 +43,45 @@ const titles = () => entry().results.map((r) => `${r.title}${r.pinned ? "*" : ""
 
 beforeEach(() => {
   replies.clear();
+  ask.mockClear();
+  setPendingChangesProbe(() => 0);
   consoleId = useConsoles.getState().create("ds-1");
+});
+
+describe("pending data editor changes", () => {
+  it("asks before a run replaces a result with unsubmitted edits, and keeps it when declined", async () => {
+    rows("select 1", [1]);
+    rows("select 2", [2]);
+    const { runStatement } = useConsoles.getState();
+    const first = await runStatement(consoleId, "select 1");
+    setPendingChangesProbe((resultId) => (resultId === first!.id ? 3 : 0));
+
+    ask.mockResolvedValueOnce(false);
+    expect(await runStatement(consoleId, "select 2")).toBeUndefined();
+    expect(ask).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title: "Discard 3 pending changes?" }));
+    expect(activeResult(entry())?.id).toBe(first!.id);
+    expect(rowGetter(first!.id)(0)).toEqual([1]);
+
+    ask.mockResolvedValueOnce(true);
+    expect(await runStatement(consoleId, "select 2")).toMatchObject({ sql: "select 2" });
+  });
+
+  it("does not ask when the run opens a new tab or nothing is pending", async () => {
+    const { runStatement } = useConsoles.getState();
+    const first = await runStatement(consoleId, "select 1");
+    await runStatement(consoleId, "select 1");
+    setPendingChangesProbe((resultId) => (resultId === first!.id ? 1 : 0));
+    await runStatement(consoleId, "select 2", { newTab: true });
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it("asks before closing a result tab with unsubmitted edits", async () => {
+    const result = await useConsoles.getState().runStatement(consoleId, "select 1");
+    setPendingChangesProbe(() => 1);
+    ask.mockResolvedValueOnce(false);
+    await useConsoles.getState().closeResult(consoleId, result!.id);
+    expect(entry().results).toHaveLength(1);
+  });
 });
 
 describe("result tabs", () => {

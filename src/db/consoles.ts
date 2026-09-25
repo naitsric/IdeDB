@@ -1,3 +1,4 @@
+import { ask } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
 import { api, errorMessage, type Column, type SessionId, type TableRef, type Value } from "./api";
 import { invalidateChecks } from "./checkRevisions";
@@ -64,13 +65,20 @@ interface ConsolesState {
   setSql: (id: string, sql: string) => void;
   /**
    * Runs one statement into a result tab and resolves to its final state, or
-   * to `undefined` when nothing ran (busy console, no session).
+   * to `undefined` when nothing ran (busy console, no session, or the user
+   * kept the pending edits the run would have replaced). `confirmed`: the
+   * caller already asked with `confirmReplace`.
    */
   runStatement: (
     id: string,
     sql: string,
-    options?: { newTab?: boolean; table?: TableRef },
+    options?: { newTab?: boolean; table?: TableRef; confirmed?: boolean },
   ) => Promise<ResultMeta | undefined>;
+  /**
+   * Whether a run may replace the result it would reuse: asks first when
+   * that result has data editor changes not yet submitted.
+   */
+  confirmReplace: (id: string, options?: { newTab?: boolean }) => Promise<boolean>;
   /** Changes a result's loaded rows in place and repaints its grid. */
   mutateRows: (id: string, resultId: number, change: (rows: Value[][]) => void) => void;
   /** Records whether the console's session has a user transaction open (after a data editor submit). */
@@ -154,6 +162,32 @@ function persist(consoles: Record<string, ConsoleState>) {
 
 let nextResultId = 0;
 
+/**
+ * Counts a result's data editor changes not yet submitted. The grid module
+ * installs it (it depends on this one, not the other way around).
+ */
+let pendingChangesOf: (resultId: number) => number = () => 0;
+
+export function setPendingChangesProbe(probe: (resultId: number) => number) {
+  pendingChangesOf = probe;
+}
+
+/** The one place that asks before unsubmitted changes are thrown away. */
+async function confirmDiscard(count: number): Promise<boolean> {
+  return ask("They have not been submitted and will be lost.", {
+    title: `Discard ${count} pending ${count === 1 ? "change" : "changes"}?`,
+    kind: "warning",
+    okLabel: "Discard",
+    cancelLabel: "Keep Editing",
+  });
+}
+
+/** The result a run would reuse: the active tab, unless asked for a new one or pinned. */
+function replacedResult(entry: ConsoleState | undefined, newTab: boolean): ResultMeta | undefined {
+  const current = activeResult(entry);
+  return !newTab && current && !current.pinned ? current : undefined;
+}
+
 export const useConsoles = create<ConsolesState>((set, get) => {
   const patch = (id: string, change: Partial<ConsoleState>) =>
     set((s) => (s.consoles[id] ? { consoles: { ...s.consoles, [id]: { ...s.consoles[id], ...change } } } : {}));
@@ -193,8 +227,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
   function openResult(id: string, sql: string, newTab: boolean, table?: TableRef): number | undefined {
     const entry = get().consoles[id];
     if (!entry) return undefined;
-    const current = activeResult(entry);
-    const replace = !newTab && current && !current.pinned ? current : undefined;
+    const replace = replacedResult(entry, newTab);
     const resultCount = replace ? entry.resultCount : entry.resultCount + 1;
     const result: ResultMeta = {
       id: ++nextResultId,
@@ -236,9 +269,16 @@ export const useConsoles = create<ConsolesState>((set, get) => {
 
     setSql: (id, sql) => patch(id, { sql }),
 
+    confirmReplace: async (id, options = {}) => {
+      const replaced = replacedResult(get().consoles[id], options.newTab ?? false);
+      const pending = replaced ? pendingChangesOf(replaced.id) : 0;
+      return pending === 0 || confirmDiscard(pending);
+    },
+
     runStatement: async (id, sql, options = {}) => {
       const statement = sql.trim();
       if (!statement || isRunning(get().consoles[id])) return undefined;
+      if (!options.confirmed && !(await get().confirmReplace(id, options))) return undefined;
 
       const sessionId = await ensureSession(id);
       if (sessionId === undefined) return undefined;
@@ -348,6 +388,8 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       const entry = get().consoles[id];
       const index = entry?.results.findIndex((r) => r.id === resultId) ?? -1;
       if (!entry || index < 0) return;
+      const pending = pendingChangesOf(resultId);
+      if (pending > 0 && !(await confirmDiscard(pending))) return;
       if (entry.results[index].status === "running") await get().cancel(id);
 
       const results = entry.results.filter((r) => r.id !== resultId);

@@ -104,7 +104,7 @@ export function DatabaseTree() {
 
   const activate = (node: NodeApi<TreeNode>) => {
     const d = node.data;
-    if (d.kind === "table") openTableData(d.sourceId, d.schema!, d.table!);
+    if (d.kind === "table") void openTableData(d.sourceId, d.schema!, d.table!);
     else if (!node.isLeaf) node.toggle();
   };
 

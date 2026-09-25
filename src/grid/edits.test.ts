@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { Value } from "../db/api";
 import {
   addRow,
+  afterSubmit,
   cellValue,
   changeCount,
   commitRows,
   DEFAULT,
   deleteRows,
   duplicateRows,
+  generatedColumns,
   NO_EDITS,
   revertRows,
   rowState,
@@ -23,6 +25,60 @@ const loaded = (): Value[][] => [
 ];
 const columns = ["id", "name", "note"];
 const keys = [0];
+
+describe("duplicating rows", () => {
+  it("leaves columns the database generates to it, keys or not", () => {
+    // An AUTO_INCREMENT / identity key without a default, plus a computed column.
+    const tableColumns = [
+      { name: "id", generated: true },
+      { name: "name", generated: false },
+      { name: "note", generated: false },
+      { name: "total", generated: true },
+    ];
+    const reset = generatedColumns(["id", "name", "note"], tableColumns);
+    expect([...reset]).toEqual([0]);
+
+    const rows = loaded();
+    const edits = duplicateRows(NO_EDITS, 3, (i) => rows[i], [1], 3, reset);
+    expect(edits.inserted[0].values).toEqual([DEFAULT, "grace", null]);
+  });
+});
+
+describe("after a submit", () => {
+  it("clears exactly what was submitted", () => {
+    const rows = loaded();
+    const get = (i: number) => rows[i];
+    const submitted = addRow(deleteRows(setCell(NO_EDITS, 3, get, 2, 1, "LINUS"), 3, [0]), 3);
+    expect(afterSubmit(submitted, submitted, 3)).toBe(NO_EDITS);
+  });
+
+  it("keeps edits made while the submit ran, on the rows they now address", () => {
+    const rows = loaded();
+    const get = (i: number) => rows[i];
+    // Submitted: delete row 0, rename row 2, one inserted row.
+    const submitted = addRow(deleteRows(setCell(NO_EDITS, 3, get, 2, 1, "LINUS"), 3, [0]), 3);
+    // Meanwhile: a note on row 2, a rename of row 1, a deletion of row 1, another inserted row.
+    let current = setCell(submitted, 3, get, 2, 2, "later");
+    current = setCell(current, 3, get, 1, 1, "GRACE");
+    current = deleteRows(current, 3, [1]);
+    current = addRow(current, 3);
+
+    const left = afterSubmit(current, submitted, 3);
+    // Row 0 is gone, so old rows 1 and 2 are now rows 0 and 1.
+    expect(left.updates).toEqual({ 0: { 1: "GRACE" }, 1: { 2: "later" } });
+    expect([...left.deleted]).toEqual([0]);
+    expect(left.inserted).toHaveLength(1);
+  });
+
+  it("drops an edit to a row the submit deleted", () => {
+    const rows = loaded();
+    const get = (i: number) => rows[i];
+    const submitted = deleteRows(NO_EDITS, 3, [1]);
+    const current = { ...submitted, updates: { 1: { 1: "ghost" } } };
+    expect(afterSubmit(current, submitted, 3).updates).toEqual({});
+    expect(get(1)).toBeDefined();
+  });
+});
 
 describe("pending edits", () => {
   it("tracks cell edits and drops them when set back to the original", () => {

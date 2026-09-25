@@ -45,6 +45,8 @@ export interface ColumnInfo {
   default: string | null;
   primaryKey: number | null;
   comment: string | null;
+  /** The database fills it itself: identity, auto-increment, serial, computed, rowid. */
+  generated: boolean;
 }
 
 export interface ForeignKey {

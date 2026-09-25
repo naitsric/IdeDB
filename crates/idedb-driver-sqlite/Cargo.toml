@@ -1,0 +1,16 @@
+[package]
+name = "idedb-driver-sqlite"
+description = "SQLite driver for idedb (rusqlite, bundled SQLite)"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+idedb-core.workspace = true
+# column_decltype: declared column types for result sets; hooks: progress handler for cancellation.
+rusqlite = { workspace = true, features = ["column_decltype", "hooks"] }
+tokio.workspace = true
+
+[dev-dependencies]
+idedb-core = { workspace = true, features = ["testing"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

@@ -10,6 +10,7 @@ import {
   type SessionId,
 } from "./api";
 import { requestPassword } from "../dialogs/dialogs";
+import { invalidateChecks } from "./checkRevisions";
 // Circular with consoles.ts; safe because each side only uses the other inside functions.
 import { useConsoles } from "./consoles";
 
@@ -185,6 +186,7 @@ export const useDataSources = create<DataSourcesState>((set, get) => {
     },
 
     refresh: async (id) => {
+      invalidateChecks(id);
       const explorer = get().explorers[id];
       if (explorer?.status !== "connected" || explorer.sessionId === undefined) {
         await get().connect(id);

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, errorMessage, type Column, type SessionId, type TableRef, type Value } from "./api";
+import { invalidateChecks } from "./checkRevisions";
 import { openSessionFor, useDataSources } from "./dataSources";
 import type { TableFilter } from "./sql";
 
@@ -39,6 +40,11 @@ export interface ConsoleState {
   dataSourceId: string;
   /** Set for consoles opened to show a table's data, with the filter bar's state. */
   table?: TableRef & TableFilter;
+  /**
+   * Where unqualified names resolve in this console (schema selector), when
+   * the user picked one other than the server default.
+   */
+  schema?: string;
   sql: string;
   sessionId?: SessionId;
   connecting?: boolean;
@@ -66,6 +72,8 @@ interface ConsolesState {
   /** Changes a result's loaded rows in place and repaints its grid. */
   mutateRows: (id: string, resultId: number, change: (rows: Value[][]) => void) => void;
   setTableFilter: (id: string, filter: TableFilter) => void;
+  /** Switches the console's current schema; `undefined` goes back to the server default. */
+  setSchema: (id: string, schema: string | undefined) => Promise<void>;
   cancel: (id: string) => Promise<void>;
   selectResult: (id: string, resultId: number) => void;
   togglePin: (id: string, resultId: number) => void;
@@ -79,6 +87,12 @@ export const activeResult = (entry: ConsoleState | undefined): ResultMeta | unde
 
 export const isRunning = (entry: ConsoleState | undefined): boolean =>
   !!entry?.results.some((r) => r.status === "running");
+
+/** Where the console's unqualified names resolve: its chosen schema, else the server default. */
+export function effectiveSchema(entry: ConsoleState | undefined): string | null {
+  if (!entry) return null;
+  return entry.schema ?? useDataSources.getState().explorers[entry.dataSourceId]?.server?.defaultSchema ?? null;
+}
 
 /**
  * Row storage lives outside React state: pages are appended in place and the
@@ -104,7 +118,7 @@ function freeRows(resultId: number) {
 }
 
 const STORAGE_KEY = "idedb.consoles.v1";
-type PersistedConsole = Pick<ConsoleState, "id" | "dataSourceId" | "table" | "sql">;
+type PersistedConsole = Pick<ConsoleState, "id" | "dataSourceId" | "table" | "schema" | "sql">;
 
 function restore(): Record<string, ConsoleState> {
   try {
@@ -120,10 +134,11 @@ function persist(consoles: Record<string, ConsoleState>) {
   window.clearTimeout(persistTimer);
   persistTimer = window.setTimeout(() => {
     try {
-      const saved: PersistedConsole[] = Object.values(consoles).map(({ id, dataSourceId, table, sql }) => ({
+      const saved: PersistedConsole[] = Object.values(consoles).map(({ id, dataSourceId, table, schema, sql }) => ({
         id,
         dataSourceId,
         table,
+        schema,
         sql,
       }));
       localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
@@ -155,6 +170,11 @@ export const useConsoles = create<ConsolesState>((set, get) => {
     patch(id, { connecting: true, connectError: undefined });
     try {
       const opened = await openSessionFor(entry.dataSourceId);
+      // A new session starts on the server default: re-apply the console's schema.
+      const schema = get().consoles[id]?.schema;
+      if (opened && schema) {
+        await api.setSchema(opened.id, schema).catch((e) => patch(id, { connectError: errorMessage(e) }));
+      }
       patch(id, { connecting: false, sessionId: opened?.id });
       // Connecting a console also connects the explorer, as DataGrip does.
       if (opened) void useDataSources.getState().connect(entry.dataSourceId);
@@ -273,6 +293,9 @@ export const useConsoles = create<ConsolesState>((set, get) => {
           update({ status: "error", error: errorMessage(e) });
           patch(id, { sessionId: undefined });
         });
+      // Whatever ran may have created or dropped objects the editors check against.
+      const dataSourceId = get().consoles[id]?.dataSourceId;
+      if (dataSourceId) invalidateChecks(dataSourceId);
 
       return get().consoles[id]?.results.find((r) => r.id === resultId);
     },
@@ -294,6 +317,16 @@ export const useConsoles = create<ConsolesState>((set, get) => {
     setTableFilter: (id, filter) => {
       const table = get().consoles[id]?.table;
       if (table) patch(id, { table: { ...table, ...filter } });
+    },
+
+    setSchema: async (id, schema) => {
+      const entry = get().consoles[id];
+      if (!entry) return;
+      patch(id, { schema, connectError: undefined });
+      // Without a session there is nothing to switch yet: the schema applies on connect.
+      const target = schema ?? useDataSources.getState().explorers[entry.dataSourceId]?.server?.defaultSchema;
+      if (entry.sessionId === undefined || !target) return;
+      await api.setSchema(entry.sessionId, target).catch((e) => patch(id, { connectError: errorMessage(e) }));
     },
 
     selectResult: (id, resultId) => patch(id, { activeResultId: resultId }),

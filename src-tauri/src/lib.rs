@@ -4,10 +4,23 @@ mod error;
 mod export;
 mod sessions;
 
-use idedb_store::{Keychain, Store};
+use idedb_store::{SecretStore, Store};
 use tauri::Manager;
 
 use crate::data_sources::Secrets;
+
+/// Passwords go to the macOS Keychain.
+#[cfg(target_os = "macos")]
+fn secret_store(app: &tauri::App) -> Box<dyn SecretStore> {
+    Box::new(idedb_store::Keychain::new(app.config().identifier.clone()))
+}
+
+/// IdeDB ships for macOS only. Other platforms build (for CI) with
+/// in-memory secrets: saved passwords are forgotten when the app quits.
+#[cfg(not(target_os = "macos"))]
+fn secret_store(_app: &tauri::App) -> Box<dyn SecretStore> {
+    Box::new(idedb_store::MemorySecrets::default())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -17,7 +30,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             app.manage(Store::open(&dir.join("idedb.db"))?);
-            app.manage(Secrets(Box::new(Keychain::new(app.config().identifier.clone()))));
+            app.manage(Secrets(secret_store(app)));
             Ok(())
         })
         .manage(sessions::Sessions::default())
@@ -34,6 +47,8 @@ pub fn run() {
             sessions::session_introspect,
             sessions::history_list,
             sessions::session_apply,
+            sessions::session_check,
+            sessions::session_set_schema,
             export::export_write,
         ])
         .run(tauri::generate_context!())

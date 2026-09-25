@@ -1,9 +1,12 @@
-import { useConsoles } from "./db/consoles";
+import { effectiveSchema, useConsoles } from "./db/consoles";
 import { useDataSources } from "./db/dataSources";
 import { selectAll, tableQuery } from "./db/sql";
 import { newDataSource, useDialogs } from "./dialogs/dialogs";
+import { catalogFor } from "./editor/catalog";
+import { declarationAt } from "./editor/navigation";
 import { editorFor } from "./editor/registry";
 import { splitStatements, type Statement } from "./editor/statements";
+import type { RevealRequest } from "./explorer/reveal";
 import { useExplorerSelection } from "./explorer/selection";
 import { showConsole, useWorkbench } from "./workbench/bridge";
 
@@ -68,8 +71,7 @@ export function runTableQuery(consoleId: string) {
   const table = entry?.table;
   const source = useDataSources.getState().sources.find((s) => s.id === entry?.dataSourceId);
   if (!table || !source) return;
-  const defaultSchema = useDataSources.getState().explorers[source.id]?.server?.defaultSchema ?? null;
-  const sql = tableQuery(source.params.engine, table.schema, table.name, defaultSchema, table);
+  const sql = tableQuery(source.params.engine, table.schema, table.name, effectiveSchema(entry), table);
   return useConsoles.getState().runStatement(consoleId, sql, { table: { schema: table.schema, name: table.name } });
 }
 
@@ -87,6 +89,17 @@ export async function runStatements(consoleId: string, statements: readonly Stat
     if (result?.status === "error") editor?.showError(statement, result.error ?? "Error", result.errorPosition);
     if (result?.status !== "done") return;
   }
+}
+
+/** What the name under a console editor's caret refers to, as an explorer path. */
+export async function declarationUnderCaret(consoleId: string): Promise<RevealRequest | null> {
+  const editor = editorFor(consoleId);
+  const entry = useConsoles.getState().consoles[consoleId];
+  const source = useDataSources.getState().sources.find((s) => s.id === entry?.dataSourceId);
+  if (!editor || !entry || !source) return null;
+  const { state, pos } = editor.caret();
+  const declaration = await declarationAt(state, pos, catalogFor(consoleId, source.id, source.params.engine));
+  return declaration && { sourceId: source.id, ...declaration };
 }
 
 /** What ⌘⏎ runs in a console: the editor's selection or caret statement. */

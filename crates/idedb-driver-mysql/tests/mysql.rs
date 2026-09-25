@@ -344,3 +344,65 @@ async fn reads_back_auto_increment_inserts() {
         }
     );
 }
+
+#[tokio::test]
+async fn checks_without_running_anything() {
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "create table if not exists idedb_check (id bigint auto_increment primary key, v int)",
+            "insert into idedb_check (v) values (1), (2)",
+        ],
+    )
+    .await;
+    testing::check_runs_nothing(
+        &mut s,
+        &[
+            "insert into idedb_check (v) values (3)",
+            "update idedb_check set v = v + 1",
+            "delete from idedb_check",
+            "truncate table idedb_check",
+            "drop table idedb_check",
+            "select * from idedb_check where id = ?",
+            // Statements MySQL cannot prepare are skipped, not run.
+            "lock tables idedb_check write",
+        ],
+        "select count(*), sum(v) from idedb_check",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn checks_report_problems_near_where_mysql_says() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["create table if not exists idedb_check_problems (id int)"]).await;
+    testing::check_reports(&mut s, "select from from idedb_check_problems", "1064", Some("from from")).await;
+    // On a later line, with multi-byte text before it: the position is in chars.
+    testing::check_reports(
+        &mut s,
+        "select 'ñandú',\n  2 frm idedb_check_problems",
+        "1064",
+        Some("idedb_check_problems"),
+    )
+    .await;
+    // Name errors carry no location in MySQL.
+    testing::check_reports(&mut s, "select * from idedb_missing", "idedb_missing' doesn't exist", None).await;
+    testing::check_reports(&mut s, "select nope from idedb_check_problems", "Unknown column 'nope'", None).await;
+}
+
+#[tokio::test]
+async fn checks_and_sets_schema() {
+    let Some(mut s) = session().await else { return };
+    let sql = "select * from customers";
+    // `customers` lives in the seeded `shop` database, not in `idedb`.
+    assert!(s.check(sql, None).await.unwrap().is_some());
+    assert_eq!(s.check(sql, Some("shop")).await.unwrap(), None);
+    assert!(s.check(sql, Some("idedb")).await.unwrap().is_some());
+
+    s.set_schema("shop").await.unwrap();
+    run_all(&mut s, &["select count(*) from customers"]).await;
+    s.set_schema("idedb").await.unwrap();
+    let events = collect(&mut s, sql, 10).await;
+    assert!(matches!(events.last(), Some(QueryEvent::Error { .. })), "{events:?}");
+}

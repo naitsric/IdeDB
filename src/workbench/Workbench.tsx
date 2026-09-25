@@ -82,6 +82,12 @@ export function toggleExplorer() {
   else panel.api.setActive();
 }
 
+/** Opens the Database Explorer if it is closed and gives it focus. */
+export function showExplorer() {
+  if (!api) return;
+  (api.getPanel(EXPLORER_PANEL_ID) ?? addExplorer(api)).api.setActive();
+}
+
 export function restoreDefaultLayout() {
   if (!api) return;
   api.getPanel(EXPLORER_PANEL_ID)?.api.close();

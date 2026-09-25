@@ -1,0 +1,113 @@
+# Checks every pull request and every push to main.
+#
+# Linux runners only: while the repository is private, macOS minutes count
+# 10x against the Actions quota. The macOS-only code (the Keychain) is
+# compiled out on Linux; the release workflow builds on macOS.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    name: Frontend (types, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm test
+      - run: pnpm build
+
+  rust:
+    name: Rust (clippy, tests against Postgres and MySQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Same databases, credentials and ports as docker-compose.yml, so
+    # `pnpm test:rust` runs unchanged.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: idedb
+          POSTGRES_PASSWORD: idedb
+          POSTGRES_DB: idedb
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U idedb"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: idedb
+          MYSQL_USER: idedb
+          MYSQL_PASSWORD: idedb
+          MYSQL_DATABASE: idedb
+        ports:
+          - 33069:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uidedb -pidedb --silent"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      # Service containers start empty; load the same seeds docker-compose
+      # mounts locally, so tests that rely on the sample `shop` data behave
+      # the same in CI.
+      - name: Seed databases
+        run: |
+          docker exec -i ${{ job.services.postgres.id }} \
+            psql -q -v ON_ERROR_STOP=1 -U idedb -d idedb < dev/seed/postgres.sql
+          docker exec -i ${{ job.services.mysql.id }} \
+            mysql -uroot -pidedb < dev/seed/mysql.sql
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: |
+          set -o pipefail
+          pnpm test:rust 2>&1 | tee rust-tests.log
+      # The driver integration tests skip themselves when their database URL
+      # is missing; in CI that would silently hide failures.
+      - name: Ensure database tests ran
+        run: |
+          if grep -E "not set, skipping" rust-tests.log; then
+            echo "::error::Database integration tests were skipped"
+            exit 1
+          fi

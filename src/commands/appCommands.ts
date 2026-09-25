@@ -35,7 +35,7 @@ import {
 } from "../grid/actions";
 import { activeGrid, selectedRows, toggleValueViewer, useGrids } from "../grid/dataEditor";
 import { useTheme } from "../theme";
-import { useWorkbench } from "../workbench/bridge";
+import { closeActivePanel, hasActivePanel, useWorkbench } from "../workbench/bridge";
 import { restoreDefaultLayout, showExplorer, toggleExplorer } from "../workbench/Workbench";
 import { useHistoryPalette } from "./HistoryPalette";
 import { registerCommands, type Command } from "./registry";
@@ -411,6 +411,14 @@ export function registerAppCommands(): () => void {
       category: "View",
       keybinding: "$mod+Digit1",
       run: toggleExplorer,
+    },
+    {
+      id: "view.closeTab",
+      title: "Close Tab",
+      category: "Workbench",
+      keybinding: "$mod+KeyW",
+      enabled: hasActivePanel,
+      run: closeActivePanel,
     },
     {
       id: "view.resetLayout",

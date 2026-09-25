@@ -44,6 +44,15 @@ export function showConsole(consoleId: string) {
   dockview.getPanel(WELCOME_PANEL_ID)?.api.close();
 }
 
+/** Closes the focused tab (a console, the explorer or the welcome page), like ⌘W in an IDE. */
+export function closeActivePanel() {
+  dockview?.activePanel?.api.close();
+}
+
+export function hasActivePanel(): boolean {
+  return !!dockview?.activePanel;
+}
+
 export function focusActiveConsole() {
   const { activeConsoleId } = useWorkbench.getState();
   if (activeConsoleId) dockview?.getPanel(consolePanelId(activeConsoleId))?.api.setActive();

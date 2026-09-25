@@ -6,6 +6,7 @@ import { SearchEverywhere, useSearchEverywhere } from "./commands/SearchEverywhe
 import { useDataSources } from "./db/dataSources";
 import { DataSourceDialog } from "./dialogs/DataSourceDialog";
 import { PasswordPrompt } from "./dialogs/PasswordPrompt";
+import { useNativeMenu } from "./menu/nativeMenu";
 import { StatusBar } from "./workbench/StatusBar";
 import { TitleBar } from "./workbench/TitleBar";
 import { Workbench } from "./workbench/Workbench";
@@ -13,6 +14,7 @@ import { Workbench } from "./workbench/Workbench";
 export default function App() {
   const openSearch = useCallback(() => useSearchEverywhere.getState().show("all"), []);
   useKeymap(openSearch);
+  useNativeMenu();
 
   useEffect(registerAppCommands, []);
   useEffect(() => {

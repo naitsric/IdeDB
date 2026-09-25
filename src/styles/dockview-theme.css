@@ -68,3 +68,19 @@
 .dockview-theme-idedb .dv-tab {
   padding: 0 10px;
 }
+
+/*
+ * Translucent sidebar (see app.css): the dockview root stops painting, console
+ * groups keep their opaque background, and the explorer's group lets the
+ * sidebar material through, tinted once by --bg-sidebar.
+ */
+:root[data-vibrancy="on"] .dv-dockview {
+  background-color: transparent;
+}
+
+:root[data-vibrancy="on"] .dockview-theme-idedb .dv-groupview:has(.explorer-panel) {
+  --dv-group-view-background-color: transparent;
+  --dv-tabs-and-actions-container-background-color: var(--bg-sidebar);
+  --dv-activegroup-visiblepanel-tab-background-color: transparent;
+  --dv-inactivegroup-visiblepanel-tab-background-color: transparent;
+}

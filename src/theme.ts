@@ -59,6 +59,37 @@ darkQuery.addEventListener("change", () => {
   if (preference === "system") useTheme.setState({ resolved: resolve(preference) });
 });
 
+const TRANSLUCENT_KEY = "idedb.translucentSidebar";
+
+/**
+ * Whether the explorer and title bar show the macOS sidebar material (on by
+ * default). Off makes every surface opaque, for anyone who prefers it.
+ */
+export const useTranslucentSidebar = create<{ enabled: boolean; toggle: () => void }>((set, get) => ({
+  enabled: (() => {
+    try {
+      return localStorage.getItem(TRANSLUCENT_KEY) !== "off";
+    } catch {
+      return true;
+    }
+  })(),
+  toggle: () => {
+    const enabled = !get().enabled;
+    try {
+      localStorage.setItem(TRANSLUCENT_KEY, enabled ? "on" : "off");
+    } catch {
+      // Not persisted; still applies for this session.
+    }
+    set({ enabled });
+  },
+}));
+
+const applyTranslucency = ({ enabled }: { enabled: boolean }) => {
+  document.documentElement.dataset.vibrancy = enabled ? "on" : "off";
+};
+applyTranslucency(useTranslucentSidebar.getState());
+useTranslucentSidebar.subscribe(applyTranslucency);
+
 /** Reads a design token's current value, for consumers that cannot use CSS (the canvas grid). */
 export function token(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();

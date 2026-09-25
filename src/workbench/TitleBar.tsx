@@ -25,7 +25,7 @@ export function TitleBar() {
   return (
     <header
       data-tauri-drag-region
-      className="flex h-[var(--titlebar-height)] shrink-0 items-center gap-3 border-b border-border bg-bg pr-2 pl-[var(--traffic-lights-inset)]"
+      className="flex h-[var(--titlebar-height)] shrink-0 items-center gap-3 border-b border-border bg-titlebar pr-2 pl-[var(--traffic-lights-inset)]"
     >
       <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2 text-[12.5px]">
         <span data-tauri-drag-region className="font-semibold text-fg">

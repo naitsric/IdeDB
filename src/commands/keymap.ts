@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { tinykeys } from "tinykeys";
+import { noteKeyboardRun } from "../menu/nativeMenu";
 import { executeCommand, focusContext, pickCommand, useCommands, type Command } from "./registry";
 
 /** Max gap between the two Shift taps of "Shift Shift", as in IntelliJ. */
@@ -33,6 +34,7 @@ export function useKeymap(onDoubleShift: () => void) {
           if (!command) return;
           event.preventDefault();
           event.stopPropagation();
+          noteKeyboardRun(command.id);
           executeCommand(command.id);
         },
       ]),

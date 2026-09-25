@@ -17,6 +17,23 @@
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 10px;
+
+  /* Opaque unless the translucent sidebar is on (see below). */
+  --bg-window: var(--bg);
+  --bg-sidebar: var(--bg-panel);
+  --bg-titlebar: var(--bg);
+}
+
+/*
+ * Translucent sidebar: the window is transparent over the macOS sidebar
+ * material (tauri.conf.json windowEffects). Only the explorer and the title
+ * bar let it through, with a light tint so text keeps its contrast; editors,
+ * grids and dialogs stay opaque. Toggled by src/theme.ts.
+ */
+:root[data-vibrancy="on"] {
+  --bg-window: transparent;
+  --bg-sidebar: var(--bg-sidebar-glass);
+  --bg-titlebar: var(--bg-titlebar-glass);
 }
 
 :root[data-theme="light"] {
@@ -25,6 +42,8 @@
   --bg-panel: #ffffff;
   --bg-elevated: #ffffff;
   --bg-inset: #fafafa;
+  --bg-sidebar-glass: rgb(250 250 251 / 0.42);
+  --bg-titlebar-glass: rgb(244 244 245 / 0.55);
   --bg-hover: rgb(0 0 0 / 0.045);
   --bg-active: rgb(0 0 0 / 0.08);
   --border: #e4e4e7;
@@ -69,6 +88,8 @@
   --bg-panel: #19191c;
   --bg-elevated: #222226;
   --bg-inset: #151517;
+  --bg-sidebar-glass: rgb(22 22 25 / 0.4);
+  --bg-titlebar-glass: rgb(17 17 19 / 0.55);
   --bg-hover: rgb(255 255 255 / 0.05);
   --bg-active: rgb(255 255 255 / 0.09);
   --border: #27272b;
@@ -114,6 +135,8 @@
   --color-panel: var(--bg-panel);
   --color-elevated: var(--bg-elevated);
   --color-inset: var(--bg-inset);
+  --color-sidebar: var(--bg-sidebar);
+  --color-titlebar: var(--bg-titlebar);
   --color-hover: var(--bg-hover);
   --color-active: var(--bg-active);
   --color-border: var(--border);
@@ -145,9 +168,13 @@ body,
   overscroll-behavior: none;
 }
 
+html {
+  background: var(--bg-window);
+}
+
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--bg-window);
   color: var(--fg);
   font-family: var(--font-ui);
   font-size: 13px;

@@ -34,8 +34,8 @@ import {
   typingInField,
 } from "../grid/actions";
 import { activeGrid, selectedRows, toggleValueViewer, useGrids } from "../grid/dataEditor";
-import { useTheme } from "../theme";
-import { useWorkbench } from "../workbench/bridge";
+import { useTheme, useTranslucentSidebar } from "../theme";
+import { closeActivePanel, hasActivePanel, useWorkbench } from "../workbench/bridge";
 import { restoreDefaultLayout, showExplorer, toggleExplorer } from "../workbench/Workbench";
 import { useHistoryPalette } from "./HistoryPalette";
 import { registerCommands, type Command } from "./registry";
@@ -413,6 +413,14 @@ export function registerAppCommands(): () => void {
       run: toggleExplorer,
     },
     {
+      id: "view.closeTab",
+      title: "Close Tab",
+      category: "Workbench",
+      keybinding: "$mod+KeyW",
+      enabled: hasActivePanel,
+      run: closeActivePanel,
+    },
+    {
       id: "view.resetLayout",
       title: "Restore Default Layout",
       category: "View",
@@ -428,6 +436,13 @@ export function registerAppCommands(): () => void {
       keywords: ["color scheme", "dark mode"],
       run: () => useTheme.getState().setPreference(preference),
     })),
+    {
+      id: "appearance.translucentSidebar",
+      title: "Toggle Translucent Sidebar",
+      category: "Appearance",
+      keywords: ["vibrancy", "transparency", "glass"],
+      run: () => useTranslucentSidebar.getState().toggle(),
+    },
   ];
 
   return registerCommands(commands);

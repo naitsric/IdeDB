@@ -87,13 +87,29 @@ takes longer), which counts 10x while the repository is private. Auto-updates
 are not wired yet: release assets of a private repository cannot be
 downloaded without authentication.
 
+## macOS integration
+
+- **Menu bar:** built from the command registry (`src/menu/`): every command
+  appears under a menu picked by its category, unknown categories under Tools.
+  A menu item shows its shortcut only when the key means the same thing
+  everywhere; context keys (⌘⏎, ⌘B, ⌘N in the grid…) stay with the JS keymap,
+  because AppKit gives menu shortcuts priority over the web view.
+- **Translucent sidebar:** the window is transparent over the sidebar material,
+  and only the explorer and title bar let it through. This uses Tauri's
+  `macos-private-api`, which the Mac App Store does not accept; IdeDB ships
+  through GitHub Releases. "Toggle Translucent Sidebar" makes everything opaque.
+- **App icon:** `design/icon.svg` is the source. After editing it, run
+  `pnpm icon` to render it and regenerate `src-tauri/icons`.
+
 ## Layout
 
 ```
 .github/workflows/   CI (Linux) and the manual Release workflow (macOS)
-scripts/             release-version.mjs: version bump across package.json and Cargo
+scripts/             release-version.mjs (version bump), render-icon.mjs (app icon)
+design/              app icon source (icon.svg) and its 1024px render
 src/                 React UI
   commands/          command registry, keymap, app commands, Search Everywhere
+  menu/              native menu bar model, built from the command registry
   actions.ts         user-level actions shared by commands, menus and search
   workbench/         window chrome, dockable panels (explorer, consoles, result tabs)
   editor/            SQL editor (CodeMirror 6): statement splitting, completion (with

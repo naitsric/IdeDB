@@ -4,7 +4,7 @@
 //! inline, so they are boxed to keep the enums small.
 
 use idedb_core::{
-    ApplyOutcome, Canceller, ConnectionParams, Engine, QueryEvent, Result, RowChange, SchemaInfo,
+    ApplyOutcome, Canceller, ConnectionParams, Engine, Fetch, QueryEvent, Result, RowChange, SchemaInfo,
     SchemaModel, ServerInfo, Session, SqlProblem, TableRef,
 };
 use idedb_driver_mysql::{MySqlCanceller, MySqlSession};
@@ -55,8 +55,16 @@ impl AnySession {
         dispatch!(self, s => s.server_info())
     }
 
-    pub async fn execute(&mut self, sql: &str, page_size: usize, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
-        dispatch!(self, s => s.execute(sql, page_size, emit).await)
+    pub async fn execute(&mut self, sql: &str, fetch: Fetch, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+        dispatch!(self, s => s.execute(sql, fetch, emit).await)
+    }
+
+    pub async fn fetch_more(&mut self, fetch: Fetch, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+        dispatch!(self, s => s.fetch_more(fetch, emit).await)
+    }
+
+    pub async fn close_result(&mut self) {
+        dispatch!(self, s => s.close_result().await)
     }
 
     pub async fn schemas(&mut self) -> Result<Vec<SchemaInfo>> {

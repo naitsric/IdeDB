@@ -1,4 +1,8 @@
-//! Data editor changes: parameterized DML inside one transaction.
+//! Data editor changes: parameterized DML applied as one unit.
+//!
+//! Outside a transaction block the batch runs in a transaction of its own;
+//! inside one the user opened, in a savepoint that is released without
+//! committing, so the user's COMMIT or ROLLBACK decides.
 //!
 //! Every value is bound as text and cast in SQL to its column's declared
 //! type (`$1::text::numeric(12,2)`), so any type Postgres can parse from
@@ -9,34 +13,40 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use idedb_core::{ApplyOutcome, ColumnValue, ROW_NOT_FOUND, Row, RowChange, TableRef, Value};
+use tokio_postgres::Client;
 use tokio_postgres::types::{ToSql, Type};
-use tokio_postgres::{Client, Transaction};
 
 use crate::decode::Cell;
 use crate::{format_error, quote};
 
+/// `inside`: the user has a transaction block open.
 pub(crate) async fn apply(
-    client: &mut Client,
+    client: &Client,
     table: &TableRef,
     changes: &[RowChange],
+    inside: bool,
 ) -> Result<ApplyOutcome, tokio_postgres::Error> {
     let types = column_types(client, table).await?;
     let target = format!("{}.{}", quote(&table.schema), quote(&table.name));
+    let (start, undo, finish) = if inside {
+        ("savepoint idedb_apply", "rollback to savepoint idedb_apply; release savepoint idedb_apply", "release savepoint idedb_apply")
+    } else {
+        ("begin", "rollback", "commit")
+    };
 
-    let tx = client.transaction().await?;
+    client.batch_execute(start).await?;
     let mut rows = Vec::with_capacity(changes.len());
     for (index, change) in changes.iter().enumerate() {
-        match apply_one(&tx, &target, &types, change).await {
+        match apply_one(client, &target, &types, change).await {
             Ok(row) => rows.push(row),
             Err(message) => {
-                // Dropping `tx` would roll back too, but asynchronously.
-                let _ = tx.rollback().await;
+                client.batch_execute(undo).await?;
                 return Ok(ApplyOutcome::Failed { index, message });
             }
         }
     }
-    tx.commit().await?;
-    Ok(ApplyOutcome::Applied { rows })
+    client.batch_execute(finish).await?;
+    Ok(ApplyOutcome::Applied { rows, in_transaction: inside })
 }
 
 /// Declared type of each column, as `format_type` prints it.
@@ -55,7 +65,7 @@ async fn column_types(client: &Client, table: &TableRef) -> Result<HashMap<Strin
 }
 
 async fn apply_one(
-    tx: &Transaction<'_>,
+    tx: &Client,
     target: &str,
     types: &HashMap<String, String>,
     change: &RowChange,

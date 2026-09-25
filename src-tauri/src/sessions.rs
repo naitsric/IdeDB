@@ -133,7 +133,7 @@ pub async fn session_execute(
     drop(session);
 
     let (elapsed_ms, row_count, error) = match &outcome {
-        Some(QueryEvent::Done { row_count, elapsed_ms, cancelled }) => {
+        Some(QueryEvent::Done { row_count, elapsed_ms, cancelled, .. }) => {
             (*elapsed_ms, Some(*row_count), cancelled.then_some("Cancelled"))
         }
         Some(QueryEvent::Error { message, .. }) => (started.elapsed().as_millis() as u64, None, Some(message.as_str())),
@@ -183,7 +183,8 @@ pub async fn session_introspect(
     Ok(session.introspect(&schema).await?)
 }
 
-/// Applies data editor changes in one transaction. The `ApplyOutcome` goes
+/// Applies data editor changes as one unit (inside the user's transaction
+/// when one is open, without committing it). The `ApplyOutcome` goes
 /// back as MessagePack, like result rows, so read-back values keep int8
 /// precision and bytes stay bytes.
 #[tauri::command]

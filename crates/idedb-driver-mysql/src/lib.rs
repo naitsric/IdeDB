@@ -6,6 +6,10 @@
 //!
 //! MySQL has no out-of-band cancel request: cancelling runs
 //! `KILL QUERY <id>` over a separate short-lived connection.
+//!
+//! Whether the user has a transaction open comes from the server's own
+//! status flags (`SERVER_STATUS_IN_TRANS`, `SERVER_STATUS_AUTOCOMMIT`),
+//! which every OK packet and result-set terminator carries.
 
 mod apply;
 mod decode;
@@ -19,6 +23,7 @@ use idedb_core::{
     ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, QueryEvent, Result, Row,
     RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode, TableRef,
 };
+use mysql_async::consts::StatusFlags;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use tokio::sync::Notify;
@@ -37,12 +42,15 @@ pub struct MySqlSession {
     conn: Conn,
     opts: Opts,
     server: ServerInfo,
-    /// Current database: the connect-time one until `set_schema` changes it.
-    /// Restored when a broken connection is replaced.
+    /// Current database, as the server reported it after the last statement
+    /// (so a `USE` typed in a console counts). Restored when a broken
+    /// connection is replaced.
     database: Option<String>,
     cancel: Arc<CancelState>,
     /// Set after a fatal (I/O or protocol) error; the next call reconnects.
     broken: bool,
+    /// Whether the user had a transaction open after the last statement.
+    in_transaction: bool,
 }
 
 /// Cancels the statement currently running on a session. Cloneable so it can
@@ -177,6 +185,7 @@ impl MySqlSession {
             },
             database: None,
             broken: false,
+            in_transaction: false,
         };
         let (version, database): (String, Option<String>) = session
             .conn
@@ -188,6 +197,30 @@ impl MySqlSession {
         session.server.default_schema = database.clone();
         session.database = database;
         Ok(session)
+    }
+
+    /// Asks the server for the current database and whether the user has a
+    /// transaction open (`BEGIN`, or autocommit turned off). The status flags
+    /// come from the terminator of this very query, so they describe the
+    /// session as it is now.
+    async fn probe(&mut self) -> Result<(Option<String>, bool), mysql_async::Error> {
+        let database: Option<Option<String>> = self.conn.query_first("select database()").await?;
+        let flags = self
+            .conn
+            .last_ok_packet()
+            .map(|ok| ok.status_flags())
+            .ok_or_else(|| mysql_async::Error::Other("the server reported no session status".into()))?;
+        let open = flags.contains(StatusFlags::SERVER_STATUS_IN_TRANS)
+            || !flags.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT);
+        Ok((database.flatten(), open))
+    }
+
+    /// Refreshes `database` and `in_transaction` from the server.
+    async fn refresh_state(&mut self) -> Result<bool, mysql_async::Error> {
+        let (database, open) = self.probe().await?;
+        self.database = database;
+        self.in_transaction = open;
+        Ok(open)
     }
 
     /// Replaces a connection that failed fatally, keeping the selected database.
@@ -290,6 +323,16 @@ impl Session for MySqlSession {
         let elapsed_ms = started.elapsed().as_millis() as u64;
         self.cancel.end().await;
 
+        if let Err(e) = &outcome {
+            self.broken |= e.is_fatal();
+        }
+        // Any statement may have changed the database or the transaction
+        // state (USE, BEGIN, COMMIT, a deadlock rollback, ...): ask the server.
+        if !self.broken && self.refresh_state().await.is_err() {
+            self.broken = true;
+        }
+        let in_transaction = self.in_transaction;
+
         // An interrupted SLEEP() returns normally, so the request flag, not
         // the outcome, decides whether the statement was cancelled.
         let cancelled = self.cancel.requested.load(Ordering::SeqCst);
@@ -298,21 +341,20 @@ impl Session for MySqlSession {
                 row_count,
                 elapsed_ms,
                 cancelled,
+                in_transaction,
             },
-            Err(e) if cancelled || server_code(&e) == Some(QUERY_INTERRUPTED) => {
-                self.broken |= e.is_fatal();
-                QueryEvent::Done {
-                    row_count: 0,
-                    elapsed_ms,
-                    cancelled: true,
-                }
-            }
+            Err(e) if cancelled || server_code(&e) == Some(QUERY_INTERRUPTED) => QueryEvent::Done {
+                row_count: 0,
+                elapsed_ms,
+                cancelled: true,
+                in_transaction,
+            },
             Err(e) => {
-                self.broken |= e.is_fatal();
                 let message = format_error(&e);
                 QueryEvent::Error {
                     position: near_position(sql, &message),
                     message,
+                    in_transaction,
                 }
             }
         });
@@ -334,7 +376,8 @@ impl Session for MySqlSession {
 
     async fn apply(&mut self, table: &TableRef, changes: &[RowChange]) -> Result<ApplyOutcome> {
         self.ensure_connected().await?;
-        apply::apply(&mut self.conn, table, changes)
+        let inside = self.refresh_state().await.map_err(|e| self.query_error(e))?;
+        apply::apply(&mut self.conn, table, changes, inside)
             .await
             .map_err(|e| self.query_error(e))
     }

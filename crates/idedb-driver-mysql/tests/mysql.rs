@@ -340,9 +340,43 @@ async fn reads_back_auto_increment_inserts() {
             rows: vec![
                 Some(vec![Value::Int(1), text("first"), text("2026-01-01"), text("1.50")]),
                 Some(vec![Value::Int(2), text("second"), text("2026-01-01"), text("1.50")]),
-            ]
+            ],
+            in_transaction: false,
         }
     );
+}
+
+#[tokio::test]
+async fn respects_user_transactions() {
+    let Some(mut s) = session().await else { return };
+    testing::respects_user_transactions(&mut s, "idedb").await;
+}
+
+/// With autocommit off every statement is part of an open transaction, so
+/// the data editor must not commit it either.
+#[tokio::test]
+async fn treats_autocommit_off_as_an_open_transaction() {
+    use idedb_core::{ApplyOutcome, ColumnValue, RowChange, TableRef};
+
+    let Some(mut s) = session().await else { return };
+    run_all(
+        &mut s,
+        &[
+            "drop table if exists idedb_autocommit",
+            "create table idedb_autocommit (id int primary key, v int not null)",
+            "insert into idedb_autocommit values (1, 0)",
+        ],
+    )
+    .await;
+    let events = collect(&mut s, "set autocommit = 0", 10).await;
+    assert!(matches!(events.last(), Some(QueryEvent::Done { in_transaction: true, .. })), "{events:?}");
+
+    let table = TableRef { schema: "idedb".into(), name: "idedb_autocommit".into() };
+    let cv = |column: &str, v: i64| ColumnValue { column: column.into(), value: Value::Int(v) };
+    let outcome = s.apply(&table, &[RowChange::Update { key: vec![cv("id", 1)], values: vec![cv("v", 1)] }]).await.unwrap();
+    assert!(matches!(outcome, ApplyOutcome::Applied { in_transaction: true, .. }), "{outcome:?}");
+    run_all(&mut s, &["rollback", "set autocommit = 1"]).await;
+    assert_eq!(rows(&collect(&mut s, "select v from idedb_autocommit", 10).await), vec![vec![Value::Int(0)]]);
 }
 
 #[tokio::test]

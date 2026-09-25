@@ -179,7 +179,7 @@ async fn locates_syntax_errors_in_chars() {
     let Some(mut s) = session().await else { return };
     // Multi-byte text before the error proves the offset is in chars, not bytes.
     let events = collect(&mut s, "select 'ñandú' from from t", 10).await;
-    let Some(QueryEvent::Error { message, position }) = events.last() else { panic!("{events:?}") };
+    let Some(QueryEvent::Error { message, position, .. }) = events.last() else { panic!("{events:?}") };
     assert!(message.contains("syntax error"), "{message}");
     assert_eq!(*position, Some(20), "{message}");
 }
@@ -188,6 +188,44 @@ async fn locates_syntax_errors_in_chars() {
 async fn applies_row_changes() {
     let Some(mut s) = session().await else { return };
     testing::applies_row_changes(&mut s, "public").await;
+}
+
+#[tokio::test]
+async fn respects_user_transactions() {
+    let Some(mut s) = session().await else { return };
+    testing::respects_user_transactions(&mut s, "public").await;
+}
+
+/// Statements a cursor cannot run still page inside the user's transaction.
+#[tokio::test]
+async fn streams_non_cursor_statements_inside_a_user_transaction() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["drop table if exists idedb_returning", "create table idedb_returning (id int)"]).await;
+    run_all(&mut s, &["begin"]).await;
+    let events = collect(&mut s, "insert into idedb_returning select g from generate_series(1, 5) g returning id", 2).await;
+    assert_eq!(rows(&events).len(), 5, "{events:?}");
+    assert!(matches!(events.last(), Some(QueryEvent::Done { in_transaction: true, .. })), "{events:?}");
+    run_all(&mut s, &["rollback"]).await;
+    let count = rows(&collect(&mut s, "select count(*) from idedb_returning", 10).await);
+    assert_eq!(count, vec![vec![Value::Int(0)]]);
+}
+
+/// The driver asks the server whether a transaction block is open, so it
+/// also knows about blocks it never saw start (a failed COMMIT, `COMMIT AND
+/// CHAIN`) and aborted blocks.
+#[tokio::test]
+async fn reports_the_server_transaction_state() {
+    let Some(mut s) = session().await else { return };
+    let state = async |s: &mut PgSession, sql: &str| match collect(s, sql, 10).await.last() {
+        Some(QueryEvent::Done { in_transaction, .. } | QueryEvent::Error { in_transaction, .. }) => *in_transaction,
+        other => panic!("{sql}: {other:?}"),
+    };
+    assert!(!state(&mut s, "select 1").await);
+    assert!(state(&mut s, "start transaction").await);
+    assert!(state(&mut s, "commit and chain").await);
+    assert!(state(&mut s, "select 1 / 0").await, "an aborted block is still open");
+    assert!(!state(&mut s, "rollback").await);
+    assert!(!state(&mut s, "select 1").await);
 }
 
 async fn run_all(s: &mut PgSession, statements: &[&str]) {
@@ -309,7 +347,7 @@ async fn applies_values_of_any_type() {
         )
         .await
         .unwrap();
-    let ApplyOutcome::Applied { rows } = outcome else { panic!("{outcome:?}") };
+    let ApplyOutcome::Applied { rows, .. } = outcome else { panic!("{outcome:?}") };
     assert_eq!(
         rows[0].as_ref().unwrap()[1..],
         [

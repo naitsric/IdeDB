@@ -1,4 +1,9 @@
-//! Data editor changes: parameterized DML inside one transaction.
+//! Data editor changes: parameterized DML applied as one unit.
+//!
+//! Outside a transaction the batch runs in one of its own; inside one the
+//! user opened (or with autocommit off), in a savepoint that is released
+//! without committing. Never `START TRANSACTION` inside the user's
+//! transaction: MySQL would silently commit it first.
 //!
 //! MySQL has no `RETURNING`, so after an insert or update the row is read
 //! back by its primary key: key values from the change, or the generated id
@@ -8,7 +13,7 @@ use std::fmt::Write as _;
 
 use idedb_core::{ApplyOutcome, ColumnValue, ROW_NOT_FOUND, Row, RowChange, TableRef, Value};
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, Params, Transaction, TxOpts, Value as MyValue};
+use mysql_async::{Conn, Params, Value as MyValue};
 
 use crate::decode::{self, Kind};
 use crate::format_error;
@@ -19,28 +24,41 @@ struct KeyInfo {
     auto_increment: Option<String>,
 }
 
+/// `inside`: the user has a transaction open.
 pub(crate) async fn apply(
     conn: &mut Conn,
     table: &TableRef,
     changes: &[RowChange],
+    inside: bool,
 ) -> Result<ApplyOutcome, mysql_async::Error> {
     let keys = key_info(conn, table).await?;
     let target = format!("{}.{}", quote(&table.schema), quote(&table.name));
+    let (start, undo, finish): (&str, &[&str], &str) = if inside {
+        (
+            "savepoint idedb_apply",
+            &["rollback to savepoint idedb_apply", "release savepoint idedb_apply"],
+            "release savepoint idedb_apply",
+        )
+    } else {
+        ("start transaction", &["rollback"], "commit")
+    };
 
-    let mut tx = conn.start_transaction(TxOpts::default()).await?;
+    conn.query_drop(start).await?;
     let mut rows = Vec::with_capacity(changes.len());
     for (index, change) in changes.iter().enumerate() {
-        match apply_one(&mut tx, &target, &keys, change).await {
+        match apply_one(conn, &target, &keys, change).await {
             Ok(row) => rows.push(row),
             Err(e) => {
                 let message = e.message();
-                tx.rollback().await?;
+                for statement in undo {
+                    conn.query_drop(*statement).await?;
+                }
                 return Ok(ApplyOutcome::Failed { index, message });
             }
         }
     }
-    tx.commit().await?;
-    Ok(ApplyOutcome::Applied { rows })
+    conn.query_drop(finish).await?;
+    Ok(ApplyOutcome::Applied { rows, in_transaction: inside })
 }
 
 /// A failed change: a server error, or a rule of ours (row not found).
@@ -83,7 +101,7 @@ async fn key_info(conn: &mut Conn, table: &TableRef) -> Result<KeyInfo, mysql_as
 }
 
 async fn apply_one(
-    tx: &mut Transaction<'_>,
+    tx: &mut Conn,
     target: &str,
     keys: &KeyInfo,
     change: &RowChange,
@@ -147,7 +165,7 @@ async fn apply_one(
     }
 }
 
-async fn read_back(tx: &mut Transaction<'_>, target: &str, key: &[ColumnValue]) -> Result<Option<Row>, ChangeError> {
+async fn read_back(tx: &mut Conn, target: &str, key: &[ColumnValue]) -> Result<Option<Row>, ChangeError> {
     let row: Option<mysql_async::Row> =
         tx.exec_first(format!("select * from {target}{}", where_clause(key)?), params(key)).await?;
     Ok(row.map(|row| {

@@ -9,7 +9,8 @@ vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   api: {
     execute: vi.fn(async (_session: number, sql: string, onEvent: (e: QueryEvent) => void) => {
-      for (const event of replies.get(sql) ?? [{ kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false }]) {
+      const done: QueryEvent = { kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false, inTransaction: false };
+      for (const event of replies.get(sql) ?? [done]) {
         onEvent(event);
       }
     }),
@@ -29,7 +30,7 @@ const rows = (sql: string, values: number[]) =>
   replies.set(sql, [
     { kind: "columns", columns: [{ name: "n", typeName: "int4" }] },
     { kind: "rows", rows: values.map((v) => [v]) },
-    { kind: "done", rowCount: values.length, elapsedMs: 3, cancelled: false },
+    { kind: "done", rowCount: values.length, elapsedMs: 3, cancelled: false, inTransaction: false },
   ]);
 
 let consoleId = "";
@@ -71,9 +72,21 @@ describe("result tabs", () => {
   });
 
   it("reports errors with their position", async () => {
-    replies.set("selec 1", [{ kind: "error", message: "syntax error", position: 0 }]);
+    replies.set("selec 1", [{ kind: "error", message: "syntax error", position: 0, inTransaction: false }]);
     const result = await useConsoles.getState().runStatement(consoleId, "selec 1");
     expect(result).toMatchObject({ status: "error", error: "syntax error", errorPosition: 0 });
+  });
+
+  it("tracks whether the session has a transaction open", async () => {
+    replies.set("begin", [{ kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false, inTransaction: true }]);
+    replies.set("select 1/0", [{ kind: "error", message: "division by zero", position: null, inTransaction: true }]);
+    const { runStatement } = useConsoles.getState();
+    await runStatement(consoleId, "begin");
+    expect(entry().inTransaction).toBe(true);
+    await runStatement(consoleId, "select 1/0");
+    expect(entry().inTransaction).toBe(true);
+    await runStatement(consoleId, "rollback");
+    expect(entry().inTransaction).toBe(false);
   });
 
   it("closing a tab frees its rows and activates a neighbour", async () => {

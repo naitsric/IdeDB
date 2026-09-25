@@ -253,7 +253,7 @@ async fn locates_syntax_errors_in_chars() {
     let (_dir, mut s) = session().await;
     // Multi-byte text before the error proves the offset is in chars, not bytes.
     let events = collect(&mut s, "select 'ñandú' from from t", 10).await;
-    let Some(QueryEvent::Error { message, position }) = events.last() else { panic!("{events:?}") };
+    let Some(QueryEvent::Error { message, position, .. }) = events.last() else { panic!("{events:?}") };
     assert!(message.contains("syntax error"), "{message}");
     assert!(!message.contains("select"), "message echoes the SQL: {message}");
     assert_eq!(*position, Some(20), "{message}");
@@ -263,6 +263,12 @@ async fn locates_syntax_errors_in_chars() {
 async fn applies_row_changes() {
     let (_dir, mut s) = session().await;
     testing::applies_row_changes(&mut s, "main").await;
+}
+
+#[tokio::test]
+async fn respects_user_transactions() {
+    let (_dir, mut s) = session().await;
+    testing::respects_user_transactions(&mut s, "main").await;
 }
 
 #[tokio::test]

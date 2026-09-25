@@ -26,6 +26,10 @@ pub trait Session: Send + 'static {
     /// Never fails itself: every outcome, including a cancellation
     /// (`Done { cancelled: true }`), is an event. The session stays usable
     /// afterwards.
+    ///
+    /// Never begins, commits or rolls back a transaction on its own: one the
+    /// user opened stays exactly as the user's statements leave it, and the
+    /// final event reports whether one is open.
     fn execute(
         &mut self,
         sql: &str,
@@ -40,11 +44,14 @@ pub trait Session: Send + 'static {
     /// Tables and views of one schema with their columns and foreign keys.
     fn introspect(&mut self, schema: &str) -> impl Future<Output = Result<SchemaModel>> + Send;
 
-    /// Applies data editor changes to `table` in one transaction, in order,
-    /// with parameterized statements. An update or delete whose key matches
-    /// no row fails with [`ROW_NOT_FOUND`](crate::ROW_NOT_FOUND). Any failure
-    /// rolls everything back and is reported as [`ApplyOutcome::Failed`];
-    /// `Err` is left for when the session itself is unusable.
+    /// Applies data editor changes to `table` as one unit, in order, with
+    /// parameterized statements: in its own transaction, or, when the user
+    /// has a transaction open, in a savepoint inside it that is released
+    /// without committing. An update or delete whose key matches no row
+    /// fails with [`ROW_NOT_FOUND`](crate::ROW_NOT_FOUND). Any failure undoes
+    /// every change of the batch (and only those) and is reported as
+    /// [`ApplyOutcome::Failed`]; `Err` is left for when the session itself is
+    /// unusable.
     fn apply(
         &mut self,
         table: &TableRef,

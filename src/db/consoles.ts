@@ -49,6 +49,8 @@ export interface ConsoleState {
   sessionId?: SessionId;
   connecting?: boolean;
   connectError?: string;
+  /** The session has a transaction the user opened, as of its last statement. */
+  inTransaction?: boolean;
   results: ResultMeta[];
   activeResultId?: number;
   /** Results opened so far, for numbering new tabs. */
@@ -71,6 +73,8 @@ interface ConsolesState {
   ) => Promise<ResultMeta | undefined>;
   /** Changes a result's loaded rows in place and repaints its grid. */
   mutateRows: (id: string, resultId: number, change: (rows: Value[][]) => void) => void;
+  /** Records whether the console's session has a user transaction open (after a data editor submit). */
+  setInTransaction: (id: string, inTransaction: boolean) => void;
   setTableFilter: (id: string, filter: TableFilter) => void;
   /** Switches the console's current schema; `undefined` goes back to the server default. */
   setSchema: (id: string, schema: string | undefined) => Promise<void>;
@@ -276,6 +280,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
                 affectedRows: hasColumns ? undefined : event.rowCount,
                 elapsedMs: event.elapsedMs,
               });
+              patch(id, { inTransaction: event.inTransaction });
               break;
             case "error":
               cancelAnimationFrame(frame);
@@ -285,13 +290,14 @@ export const useConsoles = create<ConsolesState>((set, get) => {
                 errorPosition: event.position ?? undefined,
                 rowCount: rows.length,
               });
+              patch(id, { inTransaction: event.inTransaction });
               break;
           }
         })
         .catch((e) => {
           // The session is gone (for example, its data source was disconnected).
           update({ status: "error", error: errorMessage(e) });
-          patch(id, { sessionId: undefined });
+          patch(id, { sessionId: undefined, inTransaction: false });
         });
       // Whatever ran may have created or dropped objects the editors check against.
       const dataSourceId = get().consoles[id]?.dataSourceId;
@@ -313,6 +319,8 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       change(rows);
       patchResult(id, resultId, { rowCount: rows.length, version: result.version + 1 });
     },
+
+    setInTransaction: (id, inTransaction) => patch(id, { inTransaction }),
 
     setTableFilter: (id, filter) => {
       const table = get().consoles[id]?.table;
@@ -353,7 +361,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
       const affected = Object.values(get().consoles).filter(
         (c) => c.dataSourceId === dataSourceId && c.sessionId !== undefined,
       );
-      for (const c of affected) patch(c.id, { sessionId: undefined });
+      for (const c of affected) patch(c.id, { sessionId: undefined, inTransaction: false });
       await Promise.all(affected.map((c) => api.closeSession(c.sessionId!).catch(() => {})));
     },
   };

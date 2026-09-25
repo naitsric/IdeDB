@@ -1,59 +1,125 @@
 //! PostgreSQL sessions built on `tokio-postgres`.
 //!
-//! Result sets are read through a protocol-level portal inside a
-//! transaction, `page_size` rows at a time, so arbitrarily large results
-//! never sit fully in memory and any SELECT works without rewriting it into
-//! `DECLARE CURSOR`.
+//! Result sets are paged `page_size` rows at a time, so arbitrarily large
+//! results never sit fully in memory:
+//! - outside a transaction block, through a protocol-level portal inside a
+//!   transaction of the driver's own, which works for any statement without
+//!   rewriting it;
+//! - inside a transaction the user opened, through a SQL cursor in a
+//!   savepoint, so the driver never commits or rolls back the user's
+//!   transaction. Statements a cursor cannot run (`INSERT ... RETURNING`,
+//!   `EXPLAIN`, ...) stream instead.
+//!
+//! Whether the user has a transaction block open is asked of the server
+//! (see [`PgSession::transaction_open`]), never guessed from the SQL.
 
 mod apply;
 mod decode;
 mod introspect;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use futures_util::{TryStreamExt, pin_mut};
 use idedb_core::{
     ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, QueryEvent, Result, Row,
     RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode, TableRef,
 };
 use postgres_native_tls::MakeTlsConnector;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_postgres::error::{ErrorPosition, SqlState};
-use tokio_postgres::{CancelToken, Client, Config};
+use tokio_postgres::types::ToSql;
+use tokio_postgres::{CancelToken, Client, Config, SimpleQueryMessage, Statement};
 
 use crate::decode::Cell;
 
 pub struct PgSession {
     client: Client,
-    canceller: PgCanceller,
+    cancel: Arc<CancelState>,
     server: ServerInfo,
     connection: JoinHandle<()>,
+    /// Whether the user had a transaction block open after the last statement.
+    in_transaction: bool,
 }
 
 /// Cancels the statement currently running on a session. Cloneable so it can
 /// be used while the session itself is busy executing.
 #[derive(Clone)]
 pub struct PgCanceller {
-    token: CancelToken,
+    state: Arc<CancelState>,
+}
+
+struct CancelState {
+    token: Mutex<CancelToken>,
     tls: MakeTlsConnector,
-    requested: Arc<AtomicBool>,
+    /// Checked between pages; reset when a statement starts.
+    requested: AtomicBool,
+    guard: Mutex<Guard>,
+    /// Signalled whenever an in-flight cancel request finishes.
+    request_done: Notify,
+}
+
+#[derive(Default)]
+struct Guard {
+    running: bool,
+    in_flight: usize,
 }
 
 impl Canceller for PgCanceller {
     async fn cancel(&self) -> Result<()> {
-        // The flag stops paging between fetches, when nothing is running on
-        // the server for the cancel request to hit. Repeated cancels are
-        // no-ops: every extra request is one more chance to hit a later
-        // statement instead.
-        if self.requested.swap(true, Ordering::SeqCst) {
-            return Ok(());
-        }
-        self.token
-            .cancel_query(self.tls.clone())
-            .await
-            .map_err(|e| Error::Query(e.to_string()))
+        let token = {
+            let mut guard = self.state.guard.lock().unwrap();
+            // Only a running statement is cancelled, and only once: an idle
+            // session has nothing to cancel, and an extra or late request
+            // could land on whatever runs next.
+            if !guard.running || self.state.requested.swap(true, Ordering::SeqCst) {
+                return Ok(());
+            }
+            guard.in_flight += 1;
+            self.state.token.lock().unwrap().clone()
+        };
+        // The flag alone stops paging between fetches, when nothing is
+        // running on the server for the request to hit.
+        let outcome = token.cancel_query(self.state.tls.clone()).await.map_err(|e| Error::Query(e.to_string()));
+        self.state.guard.lock().unwrap().in_flight -= 1;
+        self.state.request_done.notify_waiters();
+        outcome
     }
+}
+
+impl CancelState {
+    fn begin(&self) {
+        self.guard.lock().unwrap().running = true;
+        self.requested.store(false, Ordering::SeqCst);
+    }
+
+    /// Marks the session idle and waits for cancel requests already on their
+    /// way. The server ignores a cancel that arrives while it waits for the
+    /// next command, so none can hit the statement that runs next.
+    async fn end(&self) {
+        // Let cancels spawned during the statement (but not yet polled) run
+        // now: they will see the session idle and do nothing.
+        tokio::task::yield_now().await;
+        self.guard.lock().unwrap().running = false;
+        loop {
+            let notified = self.request_done.notified();
+            if self.guard.lock().unwrap().in_flight == 0 {
+                break;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// What a statement did.
+struct Ran {
+    row_count: u64,
+    cancelled: bool,
+    /// Transaction state after the statement, when it is known without
+    /// asking the server (a read cannot open or close a transaction block).
+    in_transaction: Option<bool>,
 }
 
 impl PgSession {
@@ -92,12 +158,48 @@ impl PgSession {
             version: row.get(0),
             default_schema: row.get(1),
         };
-        let canceller = PgCanceller {
-            token: client.cancel_token(),
+        let cancel = Arc::new(CancelState {
+            token: Mutex::new(client.cancel_token()),
             tls,
-            requested: Arc::new(AtomicBool::new(false)),
-        };
-        Ok(Self { client, canceller, server, connection })
+            requested: AtomicBool::new(false),
+            guard: Mutex::new(Guard::default()),
+            request_done: Notify::new(),
+        });
+        Ok(Self { client, cancel, server, connection, in_transaction: false })
+    }
+
+    /// Whether a transaction block is open, asked of the server itself.
+    ///
+    /// `statement_timestamp()` equals `transaction_timestamp()` exactly
+    /// during the first statement of a transaction (documented Postgres
+    /// behavior), which this probe is only when no block is open. It runs
+    /// over the simple query protocol, where a statement and its implicit
+    /// transaction share one start timestamp. In an aborted block every
+    /// statement fails with 25P02, which also means "open".
+    async fn transaction_open(&self) -> Result<bool, tokio_postgres::Error> {
+        let probe = "select pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp()";
+        match self.client.simple_query(probe).await {
+            Ok(messages) => Ok(messages
+                .iter()
+                .any(|m| matches!(m, SimpleQueryMessage::Row(row) if row.get(0) == Some("f")))),
+            Err(e) if e.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Closes a transaction the driver itself opened, after the statement it
+    /// served failed. A dropped `Transaction` already queued a ROLLBACK; this
+    /// confirms with the server that it took, and retries if a cancel
+    /// request interrupted it. Never called while the user has a block open.
+    async fn end_own_transaction(&self) {
+        for _ in 0..3 {
+            match self.transaction_open().await {
+                Ok(true) => {
+                    let _ = self.client.batch_execute("rollback").await;
+                }
+                Ok(false) | Err(_) => return,
+            }
+        }
     }
 
     async fn run(
@@ -105,14 +207,15 @@ impl PgSession {
         sql: &str,
         page_size: usize,
         emit: &mut (dyn FnMut(QueryEvent) + Send),
-    ) -> Result<(u64, bool), tokio_postgres::Error> {
+    ) -> Result<Ran, tokio_postgres::Error> {
         let statement = self.client.prepare(sql).await?;
 
-        // Statements without a result set run outside an explicit transaction
-        // so things like VACUUM or CREATE DATABASE keep working.
+        // Statements without a result set run as they are: outside a block
+        // in their own implicit transaction (so VACUUM or CREATE DATABASE
+        // work), inside one as part of it.
         if statement.columns().is_empty() {
             let affected = self.client.execute(&statement, &[]).await?;
-            return Ok((affected, false));
+            return Ok(Ran { row_count: affected, cancelled: false, in_transaction: None });
         }
 
         emit(QueryEvent::Columns {
@@ -123,57 +226,138 @@ impl PgSession {
                 .collect(),
         });
 
-        let requested = self.canceller.requested.clone();
-        let tx = self.client.transaction().await?;
-        let portal = tx.bind(&statement, &[]).await?;
-        let max_rows = i32::try_from(page_size).unwrap_or(i32::MAX);
+        let inside = self.transaction_open().await?;
+        let (row_count, cancelled) = if inside {
+            self.read_in_user_transaction(&statement, sql, page_size, emit).await?
+        } else {
+            self.read_in_own_transaction(&statement, page_size, emit).await?
+        };
+        Ok(Ran { row_count, cancelled, in_transaction: Some(inside) })
+    }
+
+    /// Pages through a portal inside a transaction of the driver's own; only
+    /// called when the user has no transaction block open.
+    async fn read_in_own_transaction(
+        &mut self,
+        statement: &Statement,
+        page_size: usize,
+        emit: &mut (dyn FnMut(QueryEvent) + Send),
+    ) -> Result<(u64, bool), tokio_postgres::Error> {
+        let cancel = self.cancel.clone();
+        let read = async {
+            let tx = self.client.transaction().await?;
+            let portal = tx.bind(statement, &[]).await?;
+            let max_rows = i32::try_from(page_size).unwrap_or(i32::MAX);
+            let mut total = 0u64;
+            loop {
+                let rows = tx.query_portal(&portal, max_rows).await?;
+                total += rows.len() as u64;
+                emit_page(&rows, emit);
+                if cancel.requested.load(Ordering::SeqCst) {
+                    tx.rollback().await?;
+                    return Ok((total, true));
+                }
+                if rows.len() < page_size {
+                    break;
+                }
+            }
+            tx.commit().await?;
+            Ok((total, false))
+        };
+        let outcome = read.await;
+        if outcome.is_err() {
+            self.end_own_transaction().await;
+        }
+        outcome
+    }
+
+    /// Pages through a cursor declared in a savepoint of the user's
+    /// transaction. A cancel between pages only closes the cursor; an error
+    /// leaves the transaction aborted, exactly as psql would.
+    async fn read_in_user_transaction(
+        &mut self,
+        statement: &Statement,
+        sql: &str,
+        page_size: usize,
+        emit: &mut (dyn FnMut(QueryEvent) + Send),
+    ) -> Result<(u64, bool), tokio_postgres::Error> {
+        self.client.batch_execute("savepoint idedb_read").await?;
+        let declare = format!("declare idedb_read no scroll cursor for\n{sql}");
+        if self.client.batch_execute(&declare).await.is_err() {
+            // Not a statement a cursor can run: undo the attempt so the
+            // user's transaction is as it was, and stream it instead.
+            self.client.batch_execute("rollback to savepoint idedb_read; release savepoint idedb_read").await?;
+            return self.stream_in_user_transaction(statement, page_size, emit).await;
+        }
+
+        let fetch = self.client.prepare(&format!("fetch forward {page_size} from idedb_read")).await?;
         let mut total = 0u64;
-
+        let mut cancelled = false;
         loop {
-            let rows = tx.query_portal(&portal, max_rows).await?;
-            let fetched = rows.len();
-            total += fetched as u64;
-
-            let page: Vec<Row> = rows
-                .iter()
-                .map(|row| (0..row.len()).map(|i| row.get::<_, Cell>(i).0).collect())
-                .collect();
-            if !page.is_empty() {
-                emit(QueryEvent::Rows { rows: page });
+            let rows = self.client.query(&fetch, &[]).await?;
+            total += rows.len() as u64;
+            emit_page(&rows, emit);
+            if self.cancel.requested.load(Ordering::SeqCst) {
+                cancelled = true;
+                break;
             }
-
-            if requested.load(Ordering::SeqCst) {
-                tx.rollback().await?;
-                return Ok((total, true));
-            }
-            if fetched < page_size {
+            if rows.len() < page_size {
                 break;
             }
         }
-        tx.commit().await?;
-        Ok((total, false))
+        self.client.batch_execute("close idedb_read; release savepoint idedb_read").await?;
+        Ok((total, cancelled))
     }
-}
 
-impl PgSession {
-    /// Makes sure an interrupted read left no transaction open. Cancel
-    /// requests are asynchronous and can land on the ROLLBACK that ends the
-    /// read, leaving the session in an aborted transaction; outside a
-    /// transaction this is a harmless no-op.
-    async fn end_transaction(&self) {
-        for _ in 0..3 {
-            if self.client.batch_execute("rollback").await.is_ok() {
-                return;
+    /// Streams a statement that cannot back a cursor, inside the user's
+    /// transaction. Rows arrive as the server sends them, so a cancel drains
+    /// what is left; the cancel request itself ends the statement.
+    async fn stream_in_user_transaction(
+        &mut self,
+        statement: &Statement,
+        page_size: usize,
+        emit: &mut (dyn FnMut(QueryEvent) + Send),
+    ) -> Result<(u64, bool), tokio_postgres::Error> {
+        let stream = self.client.query_raw(statement, std::iter::empty::<&(dyn ToSql + Sync)>()).await?;
+        pin_mut!(stream);
+        let mut page = Vec::with_capacity(page_size.min(4096));
+        let mut total = 0u64;
+        while let Some(row) = stream.try_next().await? {
+            page.push(row);
+            if page.len() == page_size {
+                total += page.len() as u64;
+                emit_page(&std::mem::take(&mut page), emit);
+                if self.cancel.requested.load(Ordering::SeqCst) {
+                    while stream.try_next().await?.is_some() {}
+                    return Ok((total, true));
+                }
             }
         }
+        total += page.len() as u64;
+        emit_page(&page, emit);
+        Ok((total, self.cancel.requested.load(Ordering::SeqCst)))
     }
 
     /// Parse and Describe only: Postgres validates syntax, names and types
     /// when it prepares a statement, and runs nothing until Execute. With a
-    /// schema, the search path is set for this check alone (`SET LOCAL`
-    /// inside a transaction that is rolled back).
-    async fn prepare_only(&mut self, sql: &str, schema: Option<&str>) -> Result<(), tokio_postgres::Error> {
-        let Some(schema) = schema.filter(|s| Some(*s) != self.server.default_schema.as_deref()) else {
+    /// schema, the search path is set for this check alone (`SET LOCAL`).
+    /// Inside the user's transaction block, where a failed Parse would abort
+    /// it, the check runs in a savepoint that is rolled back either way.
+    async fn prepare_only(&mut self, sql: &str, schema: Option<&str>, inside: bool) -> Result<(), tokio_postgres::Error> {
+        let schema = schema.filter(|s| Some(*s) != self.server.default_schema.as_deref());
+        if inside {
+            self.client.batch_execute("savepoint idedb_check").await?;
+            let checked = async {
+                if let Some(schema) = schema {
+                    self.client.batch_execute(&format!("set local search_path to {}", search_path(schema))).await?;
+                }
+                self.client.prepare(sql).await.map(drop)
+            }
+            .await;
+            self.client.batch_execute("rollback to savepoint idedb_check; release savepoint idedb_check").await?;
+            return checked;
+        }
+        let Some(schema) = schema else {
             return self.client.prepare(sql).await.map(drop);
         };
         let tx = self.client.transaction().await?;
@@ -184,11 +368,22 @@ impl PgSession {
     }
 }
 
+fn emit_page(rows: &[tokio_postgres::Row], emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+    if rows.is_empty() {
+        return;
+    }
+    let page: Vec<Row> = rows
+        .iter()
+        .map(|row| (0..row.len()).map(|i| row.get::<_, Cell>(i).0).collect())
+        .collect();
+    emit(QueryEvent::Rows { rows: page });
+}
+
 impl Session for PgSession {
     type Canceller = PgCanceller;
 
     fn canceller(&self) -> PgCanceller {
-        self.canceller.clone()
+        PgCanceller { state: self.cancel.clone() }
     }
 
     fn server_info(&self) -> &ServerInfo {
@@ -196,20 +391,33 @@ impl Session for PgSession {
     }
 
     async fn execute(&mut self, sql: &str, page_size: usize, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
-        self.canceller.requested.store(false, Ordering::SeqCst);
+        let cancel = self.cancel.clone();
+        cancel.begin();
         let started = Instant::now();
         let outcome = self.run(sql, page_size.max(1), emit).await;
-        if !matches!(outcome, Ok((_, false))) {
-            self.end_transaction().await;
-        }
         let elapsed_ms = started.elapsed().as_millis() as u64;
+        cancel.end().await;
+
+        // Anything but a read may have opened or closed a transaction block
+        // (BEGIN, COMMIT, a failed COMMIT, ...): ask the server.
+        let known = outcome.as_ref().ok().and_then(|ran| ran.in_transaction);
+        let in_transaction = match known {
+            Some(open) => open,
+            None => self.transaction_open().await.unwrap_or(self.in_transaction),
+        };
+        self.in_transaction = in_transaction;
 
         emit(match outcome {
-            Ok((row_count, cancelled)) => QueryEvent::Done { row_count, elapsed_ms, cancelled },
+            Ok(ran) => QueryEvent::Done {
+                row_count: ran.row_count,
+                elapsed_ms,
+                cancelled: ran.cancelled,
+                in_transaction,
+            },
             Err(e) if e.code() == Some(&SqlState::QUERY_CANCELED) => {
-                QueryEvent::Done { row_count: 0, elapsed_ms, cancelled: true }
+                QueryEvent::Done { row_count: 0, elapsed_ms, cancelled: true, in_transaction }
             }
-            Err(e) => QueryEvent::Error { message: format_error(&e), position: error_position(&e) },
+            Err(e) => QueryEvent::Error { message: format_error(&e), position: error_position(&e), in_transaction },
         });
     }
 
@@ -222,29 +430,42 @@ impl Session for PgSession {
     }
 
     async fn apply(&mut self, table: &TableRef, changes: &[RowChange]) -> Result<ApplyOutcome> {
-        let outcome = apply::apply(&mut self.client, table, changes).await;
-        if !matches!(outcome, Ok(ApplyOutcome::Applied { .. })) {
-            self.end_transaction().await;
+        let inside = self.transaction_open().await.map_err(|e| Error::Query(format_error(&e)))?;
+        let outcome = apply::apply(&self.client, table, changes, inside).await;
+        if outcome.is_err() && !inside {
+            self.end_own_transaction().await;
         }
         outcome.map_err(|e| Error::Query(format_error(&e)))
     }
 
     async fn check(&mut self, sql: &str, schema: Option<&str>) -> Result<Option<SqlProblem>> {
-        match self.prepare_only(sql, schema).await {
+        let inside = self.transaction_open().await.map_err(|e| Error::Query(format_error(&e)))?;
+        match self.prepare_only(sql, schema, inside).await {
             Ok(()) => Ok(None),
             // Parameters Postgres cannot type without an execution context
-            // (`$1` alone in a select list) are not the user's mistake.
-            Err(e) if e.code() == Some(&SqlState::INDETERMINATE_DATATYPE) => Ok(None),
+            // (`$1` alone in a select list) are not the user's mistake, and
+            // an aborted transaction checks nothing.
+            Err(e)
+                if e.code() == Some(&SqlState::INDETERMINATE_DATATYPE)
+                    || e.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) =>
+            {
+                Ok(None)
+            }
             Err(e) if e.as_db_error().is_some() => {
                 Ok(Some(SqlProblem { message: format_error(&e), position: error_position(&e) }))
             }
             Err(e) => {
-                self.end_transaction().await;
+                if !inside {
+                    self.end_own_transaction().await;
+                }
                 Err(Error::Query(format_error(&e)))
             }
         }
     }
 
+    /// Changes the session's `search_path`. Inside the user's transaction
+    /// the change is part of it (undone by a ROLLBACK), as a typed `SET`
+    /// would be; it never begins or ends a transaction.
     async fn set_schema(&mut self, schema: &str) -> Result<()> {
         let sql = if Some(schema) == self.server.default_schema.as_deref() {
             "reset search_path".to_owned()

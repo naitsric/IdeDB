@@ -78,9 +78,10 @@ export interface Column {
 export type QueryEvent =
   | { kind: "columns"; columns: Column[] }
   | { kind: "rows"; rows: Value[][] }
-  | { kind: "done"; rowCount: number; elapsedMs: number; cancelled: boolean }
+  /** `inTransaction`: the user has a transaction open after the statement (BEGIN, or autocommit off). */
+  | { kind: "done"; rowCount: number; elapsedMs: number; cancelled: boolean; inTransaction: boolean }
   /** `position`: code points into the statement where the engine located the error. */
-  | { kind: "error"; message: string; position: number | null };
+  | { kind: "error"; message: string; position: number | null; inTransaction: boolean };
 
 export type Row = Value[];
 
@@ -102,9 +103,12 @@ export type RowChange =
   | { kind: "delete"; key: ColumnValue[] };
 
 export type ApplyOutcome =
-  /** `rows` pairs with the changes: the stored row, or null (deletes, unreadable inserts). */
-  | { status: "applied"; rows: (Row | null)[] }
-  /** Change `index` failed; nothing was written. */
+  /**
+   * `rows` pairs with the changes: the stored row, or null (deletes, unreadable inserts).
+   * `inTransaction`: written into the user's open transaction, not committed.
+   */
+  | { status: "applied"; rows: (Row | null)[]; inTransaction: boolean }
+  /** Change `index` failed; nothing of the batch was written. */
   | { status: "failed"; index: number; message: string };
 
 /** JSON cannot carry bigint or bytes: bigint goes as text (every engine casts it back), bytes as a number array. */

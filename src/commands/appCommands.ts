@@ -14,6 +14,14 @@ import { revealInExplorer } from "../explorer/reveal";
 import { isRunning, useConsoles } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { qualifiedName, quoteIdent } from "../db/sql";
+import {
+  confirmEndTransactions,
+  consolesWithOpenTransactions,
+  endTransaction,
+  quitApp,
+  toggleMode,
+  useTransactions,
+} from "../db/transactions";
 import { useExplorerSelection } from "../explorer/selection";
 import {
   addNewRow,
@@ -48,6 +56,14 @@ const activeConsole = () => {
   return id ? useConsoles.getState().consoles[id] : undefined;
 };
 const isConnected = (id: string | undefined) => !!id && sources().explorers[id]?.status === "connected";
+/** Commit/Rollback: the active console has a transaction open and nothing running on it. */
+const canEndTransaction = () => {
+  const entry = activeConsole();
+  return !!entry?.inTransaction && !isRunning(entry) && !useTransactions.getState().ending[entry.id];
+};
+/** Asks to end the open transactions of a data source's consoles before its sessions go away. */
+const confirmForDataSource = (dataSourceId: string, action: string) =>
+  confirmEndTransactions(consolesWithOpenTransactions(useConsoles.getState().consoles, dataSourceId), action);
 const hasActiveEditor = () => {
   const entry = activeConsole();
   return !!entry && !!editorFor(entry.id);
@@ -115,7 +131,10 @@ export function registerAppCommands(): () => void {
       title: "Disconnect",
       category: "Data Source",
       enabled: () => isConnected(contextDataSourceId()),
-      run: () => sources().disconnect(contextDataSourceId()!),
+      run: async () => {
+        const id = contextDataSourceId()!;
+        if (await confirmForDataSource(id, "disconnect")) await sources().disconnect(id);
+      },
     },
     {
       id: "datasource.delete",
@@ -131,7 +150,7 @@ export function registerAppCommands(): () => void {
           kind: "warning",
           okLabel: "Delete",
         });
-        if (confirmed) await sources().remove(source.id);
+        if (confirmed && (await confirmForDataSource(source.id, "delete the data source"))) await sources().remove(source.id);
       },
     },
 
@@ -212,6 +231,43 @@ export function registerAppCommands(): () => void {
       run: () => {
         const entry = activeConsole();
         if (entry) return useConsoles.getState().cancel(entry.id);
+      },
+    },
+
+    // Transactions
+    {
+      id: "transaction.commit",
+      title: "Commit",
+      category: "Transaction",
+      keybinding: "$mod+Alt+Enter",
+      keywords: ["transaction", "tx"],
+      enabled: canEndTransaction,
+      run: async () => {
+        const entry = activeConsole();
+        if (entry) await endTransaction(entry.id, "commit");
+      },
+    },
+    {
+      id: "transaction.rollback",
+      title: "Rollback",
+      category: "Transaction",
+      keybinding: "$mod+Alt+Shift+KeyZ",
+      keywords: ["transaction", "tx", "undo"],
+      enabled: canEndTransaction,
+      run: async () => {
+        const entry = activeConsole();
+        if (entry) await endTransaction(entry.id, "rollback");
+      },
+    },
+    {
+      id: "transaction.toggleMode",
+      title: "Toggle Manual Transaction Mode",
+      category: "Transaction",
+      keywords: ["tx", "auto-commit", "autocommit", "auto", "manual"],
+      enabled: () => !!activeConsole(),
+      run: () => {
+        const entry = activeConsole();
+        if (entry) toggleMode(entry.id);
       },
     },
 
@@ -419,6 +475,14 @@ export function registerAppCommands(): () => void {
       keybinding: "$mod+KeyW",
       enabled: hasActivePanel,
       run: closeActivePanel,
+    },
+    {
+      id: "app.quit",
+      title: "Quit IdeDB",
+      category: "Application",
+      keybinding: "$mod+KeyQ",
+      keywords: ["exit", "close"],
+      run: quitApp,
     },
     {
       id: "view.resetLayout",

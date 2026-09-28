@@ -4,6 +4,7 @@ import { HistoryPalette } from "./commands/HistoryPalette";
 import { useKeymap } from "./commands/keymap";
 import { SearchEverywhere, useSearchEverywhere } from "./commands/SearchEverywhere";
 import { useDataSources } from "./db/dataSources";
+import { guardWindowClose } from "./db/transactions";
 import { DataSourceDialog } from "./dialogs/DataSourceDialog";
 import { PasswordPrompt } from "./dialogs/PasswordPrompt";
 import { useNativeMenu } from "./menu/nativeMenu";
@@ -17,6 +18,7 @@ export default function App() {
   useNativeMenu();
 
   useEffect(registerAppCommands, []);
+  useEffect(guardWindowClose, []);
   useEffect(() => {
     void useDataSources.getState().load();
   }, []);

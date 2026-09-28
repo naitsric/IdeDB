@@ -23,6 +23,13 @@ fn secret_store(_app: &tauri::App) -> Box<dyn SecretStore> {
     Box::new(idedb_store::MemorySecrets::default())
 }
 
+/// Ends the app. The UI's Quit (menu and ⌘Q) calls it only after asking
+/// about open transactions; see src/db/transactions.ts.
+#[tauri::command]
+fn app_quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -58,6 +65,7 @@ pub fn run() {
             export::export_write,
             export::export_finish,
             menu::menu_set,
+            app_quit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

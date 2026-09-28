@@ -101,6 +101,32 @@ downloaded without authentication.
 - **App icon:** `design/icon.svg` is the source. After editing it, run
   `pnpm icon` to render it and regenerate `src-tauri/icons`.
 
+## Transactions
+
+Each console has a transaction mode, like DataGrip's **Tx: Auto / Manual**
+(toolbar toggle, or "Toggle Manual Transaction Mode"; remembered per console):
+
+- **Auto:** every statement commits on its own, unless you type `BEGIN`.
+- **Manual:** the first statement opens a transaction (`BEGIN`, or
+  `START TRANSACTION` on MySQL) and everything after it, data editor submits
+  included, stays uncommitted until you commit or roll back.
+
+While a transaction is open the console shows how long it has been open and
+how many statements ran in it; the status bar shows it for the active console.
+
+| Action   | Shortcut |
+|----------|----------|
+| Commit   | ⌥⌘⏎      |
+| Rollback | ⌥⇧⌘Z     |
+
+Closing a console tab, disconnecting or deleting its data source, and quitting
+or closing the window with a transaction open first ask whether to commit or
+roll back, or cancel. The Dock's Quit and system logout end the app without
+asking (macOS gives apps no way to stop them), and an uncommitted transaction
+is then rolled back by the server. If a transaction ends on its own (lost
+connection, an implicit commit by DDL, PostgreSQL rolling back a failed one
+on COMMIT), the console says so.
+
 ## Layout
 
 ```

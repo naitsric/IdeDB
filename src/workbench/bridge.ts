@@ -1,5 +1,6 @@
 import type { DockviewApi } from "dockview-react";
 import { create } from "zustand";
+import { confirmEndTransactions } from "../db/transactions";
 
 /**
  * Lets code outside React (commands, actions) open and focus workbench
@@ -44,9 +45,17 @@ export function showConsole(consoleId: string) {
   dockview.getPanel(WELCOME_PANEL_ID)?.api.close();
 }
 
+/** Closes a console's tab, first asking to commit or roll back its open transaction. */
+export async function closeConsole(consoleId: string) {
+  if (!(await confirmEndTransactions([consoleId], "close the console"))) return;
+  dockview?.getPanel(consolePanelId(consoleId))?.api.close();
+}
+
 /** Closes the focused tab (a console, the explorer or the welcome page), like ⌘W in an IDE. */
-export function closeActivePanel() {
-  dockview?.activePanel?.api.close();
+export async function closeActivePanel() {
+  const panel = dockview?.activePanel;
+  if (panel?.id.startsWith("console:")) await closeConsole(panel.id.slice("console:".length));
+  else panel?.api.close();
 }
 
 export function hasActivePanel(): boolean {

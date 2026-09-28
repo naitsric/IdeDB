@@ -1,15 +1,18 @@
 import "dockview-react/dist/styles/dockview.css";
 import {
+  DockviewDefaultTab,
   DockviewReact,
   type DockviewApi,
   type DockviewReadyEvent,
   type DockviewTheme,
+  type IDockviewPanelHeaderProps,
   type IDockviewPanelProps,
 } from "dockview-react";
 import type { FunctionComponent } from "react";
 import { useConsoles } from "../db/consoles";
 import {
   attachDockview,
+  closeConsole,
   EXPLORER_PANEL_ID,
   showConsole,
   useWorkbench,
@@ -33,6 +36,18 @@ const components: Record<string, FunctionComponent<IDockviewPanelProps<any>>> = 
   console: ConsolePanel,
   welcome: WelcomePanel,
 };
+
+/**
+ * The stock tab, except that closing a console (its button or a middle
+ * click) goes through the open-transaction guard first.
+ */
+function Tab(props: IDockviewPanelHeaderProps) {
+  const id = props.api.id;
+  const consoleId = id.startsWith("console:") ? id.slice("console:".length) : undefined;
+  return (
+    <DockviewDefaultTab {...props} closeActionOverride={consoleId ? () => void closeConsole(consoleId) : undefined} />
+  );
+}
 
 let api: DockviewApi | null = null;
 
@@ -142,5 +157,13 @@ export function Workbench() {
     });
   };
 
-  return <DockviewReact className="h-full" theme={theme} components={components} onReady={onReady} />;
+  return (
+    <DockviewReact
+      className="h-full"
+      theme={theme}
+      components={components}
+      defaultTabComponent={Tab}
+      onReady={onReady}
+    />
+  );
 }

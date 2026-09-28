@@ -118,6 +118,20 @@ describe("buildMenuModel", () => {
     });
   });
 
+  it("replaces the predefined Quit with IdeDB's own, which asks about open transactions", () => {
+    expect(menu(menus, "IdeDB")!.items.at(-1)).toEqual({ kind: "predefined", name: "quit" });
+
+    const withQuit = buildMenuModel([
+      ...commands,
+      command("app.quit", "Application", { keybinding: "$mod+KeyQ" }),
+      command("transaction.commit", "Transaction", { keybinding: "$mod+Alt+Enter" }),
+    ]);
+    const app = menu(withQuit, "IdeDB")!.items;
+    expect(app.at(-1)).toEqual({ kind: "command", commandId: "app.quit", title: "app.quit", accelerator: "CmdOrCtrl+Q" });
+    expect(app.some((i) => i.kind === "predefined" && i.name === "quit")).toBe(false);
+    expect(commandIds(menu(withQuit, "Query"))).toContain("transaction.commit");
+  });
+
   it("ends with Window and a Help link to the repository", () => {
     expect(menu(menus, "Window")!.items.map((i) => (i.kind === "predefined" ? i.name : i.kind))).toEqual([
       "minimize",

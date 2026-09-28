@@ -63,7 +63,15 @@ const CATEGORY_MENU: [category: string, menu: MenuId][] = [
   ["Appearance", "view"],
   ["Navigate", "navigate"],
   ["Console", "query"],
+  ["Transaction", "query"],
 ];
+
+/**
+ * Commands of this category go to the app menu, in place of the predefined
+ * Quit: IdeDB's Quit asks about open transactions first, and the predefined
+ * item ends the app without asking anyone.
+ */
+const APP_CATEGORY = "Application";
 
 /**
  * Keys the webview itself must receive. AppKit gives menu key equivalents
@@ -145,7 +153,12 @@ export function buildMenuModel(commands: readonly Command[]): MenuSpec[] {
 
   // menu → category → commands, keeping registration order within a category.
   const sections = new Map<MenuId, Map<string, Command[]>>();
+  const appCommands: Command[] = [];
   for (const command of commands) {
+    if (command.category === APP_CATEGORY) {
+      appCommands.push(command);
+      continue;
+    }
     const menu = menuOf.get(command.category) ?? "tools";
     const byCategory = sections.get(menu) ?? new Map<string, Command[]>();
     byCategory.set(command.category, [...(byCategory.get(command.category) ?? []), command]);
@@ -168,6 +181,12 @@ export function buildMenuModel(commands: readonly Command[]): MenuSpec[] {
 
   const predefined = (...names: PredefinedItem[]): MenuEntry[] => names.map((name) => ({ kind: "predefined", name }));
   const separator: MenuEntry = { kind: "separator" };
+  const appItems: MenuEntry[] = appCommands.map((c) => ({
+    kind: "command",
+    commandId: c.id,
+    title: c.title,
+    accelerator: menuAccelerator(c, commands),
+  }));
 
   const app: MenuSpec = {
     title: "IdeDB",
@@ -178,7 +197,7 @@ export function buildMenuModel(commands: readonly Command[]): MenuSpec[] {
       separator,
       ...predefined("hide", "hideOthers", "showAll"),
       separator,
-      ...predefined("quit"),
+      ...(appItems.length > 0 ? appItems : predefined("quit")),
     ],
   };
 

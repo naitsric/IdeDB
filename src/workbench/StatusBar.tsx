@@ -1,7 +1,8 @@
 import { isRunning, useConsoles } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
+import { useTransactions } from "../db/transactions";
 import { ENGINE_LABEL } from "../ui/EngineIcon";
-import { StatusDot } from "../ui/primitives";
+import { cx, StatusDot } from "../ui/primitives";
 import { useWorkbench } from "./bridge";
 
 export function StatusBar() {
@@ -9,6 +10,9 @@ export function StatusBar() {
   const activeConsoleId = useWorkbench((s) => s.activeConsoleId);
   const dataSourceId = useConsoles((s) => (activeConsoleId ? s.consoles[activeConsoleId]?.dataSourceId : undefined));
   const running = useConsoles((s) => isRunning(activeConsoleId ? s.consoles[activeConsoleId] : undefined));
+  const inTransaction = useConsoles((s) => !!(activeConsoleId && s.consoles[activeConsoleId]?.inTransaction));
+  const mode = useTransactions((s) => (activeConsoleId ? (s.modes[activeConsoleId] ?? "auto") : undefined));
+  const failed = useTransactions((s) => !!(activeConsoleId && s.open[activeConsoleId]?.failed));
   const server = useDataSources((s) => (dataSourceId ? s.explorers[dataSourceId]?.server : undefined));
 
   return (
@@ -18,11 +22,19 @@ export function StatusBar() {
         {connected === 0 ? "No connections" : `${connected} connected`}
       </span>
       {running && <span className="text-accent">Executing…</span>}
-      {server && (
-        <span className="ml-auto">
-          {ENGINE_LABEL[server.engine]} {server.version}
+      {inTransaction && (
+        <span className={cx("font-medium", failed ? "text-danger" : "text-warning")}>
+          {failed ? "Transaction failed" : "Transaction open"}
         </span>
       )}
+      <span className="ml-auto flex items-center gap-3">
+        {mode && <span title="Transaction mode of the active console">Tx: {mode === "manual" ? "Manual" : "Auto"}</span>}
+        {server && (
+          <span>
+            {ENGINE_LABEL[server.engine]} {server.version}
+          </span>
+        )}
+      </span>
     </footer>
   );
 }

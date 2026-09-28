@@ -6,6 +6,7 @@
 
 mod connection;
 mod edit;
+mod fetch;
 mod schema;
 mod session;
 #[cfg(feature = "testing")]
@@ -13,6 +14,7 @@ pub mod testing;
 
 pub use connection::{ConnectionParams, Engine, ServerInfo, SslMode};
 pub use edit::{ApplyOutcome, ColumnValue, ROW_NOT_FOUND, RowChange, TableRef};
+pub use fetch::{Fetch, Paged, Pager};
 pub use schema::{ColumnInfo, ForeignKey, ObjectKind, SchemaInfo, SchemaModel, TableInfo};
 pub use session::{Canceller, Session};
 
@@ -48,6 +50,8 @@ pub type Row = Vec<Value>;
 
 /// Messages streamed to the UI while a statement runs, in this order:
 /// `Columns`, zero or more `Rows`, then exactly one of `Done` or `Error`.
+/// Continuing an open result ([`Session::fetch_more`]) sends `Rows` and the
+/// final event only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum QueryEvent {
@@ -59,10 +63,13 @@ pub enum QueryEvent {
     },
     #[serde(rename_all = "camelCase")]
     Done {
-        /// Rows returned, or rows affected for DML.
+        /// Rows returned by this call, or rows affected for DML.
         row_count: u64,
         elapsed_ms: u64,
         cancelled: bool,
+        /// Reading paused at the fetch limit and the rest of the result is
+        /// still open on the session, for `fetch_more`.
+        has_more: bool,
         /// Whether the session is inside a transaction the user opened
         /// (`BEGIN`, or autocommit off), as of after this statement.
         in_transaction: bool,
@@ -99,6 +106,11 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// The `Error` message of `fetch_more` when the session has no open result:
+/// it was read to the end, closed, or replaced by something else the
+/// session did (another statement, a data editor submit, an idle timeout).
+pub const NO_OPEN_RESULT: &str = "The result is no longer open: run the statement again to fetch more rows.";
 
 #[cfg(test)]
 mod tests {

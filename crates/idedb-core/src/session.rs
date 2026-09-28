@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use crate::{
-    ApplyOutcome, QueryEvent, Result, RowChange, SchemaInfo, SchemaModel, ServerInfo, SqlProblem, TableRef,
+    ApplyOutcome, Fetch, QueryEvent, Result, RowChange, SchemaInfo, SchemaModel, ServerInfo, SqlProblem, TableRef,
 };
 
 /// An open connection to one database server, implemented by each driver.
@@ -9,6 +9,11 @@ use crate::{
 /// A session runs one statement at a time; callers serialize access. The app
 /// dispatches over the concrete drivers with an enum, so the trait uses
 /// `async fn`-style methods rather than being object safe.
+///
+/// A session holds at most one open result: the rows a statement had left
+/// when it paused at its fetch limit. Anything else the session does
+/// (another statement, `apply`, `check`, `set_schema`, introspection) closes
+/// it first, so an open result never outlives what the user sees it belong to.
 pub trait Session: Send + 'static {
     type Canceller: Canceller;
 
@@ -21,7 +26,12 @@ pub trait Session: Send + 'static {
 
     /// Runs one statement, reporting through `emit`, in order:
     /// `Columns` (only for statements that return rows), `Rows` in pages of
-    /// at most `page_size` rows, then exactly one `Done` or `Error`.
+    /// at most `fetch.page_size` rows, then exactly one `Done` or `Error`.
+    ///
+    /// With a `fetch.limit`, reading pauses after that many rows: `Done`
+    /// reports `has_more: true` and the rest stays open for
+    /// [`fetch_more`](Self::fetch_more). Holding a result open never makes a
+    /// transaction the user can see: `in_transaction` is about the user's own.
     ///
     /// Never fails itself: every outcome, including a cancellation
     /// (`Done { cancelled: true }`), is an event. The session stays usable
@@ -33,9 +43,22 @@ pub trait Session: Send + 'static {
     fn execute(
         &mut self,
         sql: &str,
-        page_size: usize,
+        fetch: Fetch,
         emit: &mut (dyn FnMut(QueryEvent) + Send),
     ) -> impl Future<Output = ()> + Send;
+
+    /// Continues the open result: `Rows` pages, then `Done` (`row_count`
+    /// counts this call's rows; `has_more` says whether the result is still
+    /// open) or `Error`. Without an open result it emits an `Error` with
+    /// [`NO_OPEN_RESULT`](crate::NO_OPEN_RESULT). Cancellable like `execute`:
+    /// a cancelled fetch reports `cancelled` and whether the rest is still
+    /// open.
+    fn fetch_more(&mut self, fetch: Fetch, emit: &mut (dyn FnMut(QueryEvent) + Send))
+    -> impl Future<Output = ()> + Send;
+
+    /// Releases the open result without reading the rest. A no-op without
+    /// one; never begins or ends a transaction the user opened.
+    fn close_result(&mut self) -> impl Future<Output = ()> + Send;
 
     /// Namespaces below the connection (schemas, MySQL databases, SQLite
     /// attached databases), system ones included and flagged.

@@ -6,6 +6,7 @@ import { SearchEverywhere, useSearchEverywhere } from "./commands/SearchEverywhe
 import { useDataSources } from "./db/dataSources";
 import { guardWindowClose } from "./db/transactions";
 import { DataSourceDialog } from "./dialogs/DataSourceDialog";
+import { PageSizeDialog } from "./dialogs/PageSizeDialog";
 import { PasswordPrompt } from "./dialogs/PasswordPrompt";
 import { useNativeMenu } from "./menu/nativeMenu";
 import { StatusBar } from "./workbench/StatusBar";
@@ -34,6 +35,7 @@ export default function App() {
       <HistoryPalette />
       <DataSourceDialog />
       <PasswordPrompt />
+      <PageSizeDialog />
     </div>
   );
 }

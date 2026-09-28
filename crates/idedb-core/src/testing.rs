@@ -5,12 +5,13 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    ApplyOutcome, Canceller, ColumnValue, QueryEvent, ROW_NOT_FOUND, Row, RowChange, Session, TableRef, Value,
+    ApplyOutcome, Canceller, ColumnValue, Fetch, NO_OPEN_RESULT, QueryEvent, ROW_NOT_FOUND, Row, RowChange, Session,
+    TableRef, Value,
 };
 
 pub async fn collect(session: &mut impl Session, sql: &str, page_size: usize) -> Vec<QueryEvent> {
     let mut events = Vec::new();
-    session.execute(sql, page_size, &mut |e| events.push(e)).await;
+    session.execute(sql, Fetch::all(page_size), &mut |e| events.push(e)).await;
     events
 }
 
@@ -30,7 +31,7 @@ pub async fn streams_in_pages(session: &mut impl Session, sql: &str, expected: u
     let started = Instant::now();
     let (mut pages, mut total, mut columns, mut done) = (0, 0, false, None);
     session
-        .execute(sql, page_size, &mut |e| match e {
+        .execute(sql, Fetch::all(page_size), &mut |e| match e {
             QueryEvent::Columns { .. } => {
                 assert_eq!(pages, 0, "Columns must come before any Rows");
                 columns = true;
@@ -83,7 +84,7 @@ pub async fn cancels_between_pages(session: &mut impl Session, sql: &str, page_s
     let canceller = session.canceller();
     let (mut total, mut last) = (0, None);
     session
-        .execute(sql, page_size, &mut |e| {
+        .execute(sql, Fetch::all(page_size), &mut |e| {
             if let QueryEvent::Rows { rows } = &e {
                 total += rows.len();
                 // Cancel from inside the stream, as the UI would mid-scroll.
@@ -248,7 +249,7 @@ pub async fn respects_user_transactions(session: &mut impl Session, schema: &str
     let canceller = session.canceller();
     let mut last = None;
     session
-        .execute("select id from idedb_user_tx order by id", 2, &mut |e| {
+        .execute("select id from idedb_user_tx order by id", Fetch::all(2), &mut |e| {
             if matches!(e, QueryEvent::Rows { .. }) {
                 let c = canceller.clone();
                 tokio::spawn(async move { c.cancel().await });
@@ -340,6 +341,209 @@ pub async fn check_reports(session: &mut impl Session, sql: &str, fragment: &str
         sql[..byte].chars().count() as u32
     });
     assert_eq!(problem.position, expected, "{sql}: wrong position in {problem:?}");
+    assert_usable(session).await;
+}
+
+/// Runs `sql` reading only its first `limit` rows.
+pub async fn collect_first(session: &mut impl Session, sql: &str, limit: usize, page_size: usize) -> Vec<QueryEvent> {
+    let mut events = Vec::new();
+    session.execute(sql, Fetch::first(limit, page_size), &mut |e| events.push(e)).await;
+    events
+}
+
+/// Continues the open result: `limit` more rows, or all of them.
+pub async fn collect_more(session: &mut impl Session, limit: Option<usize>, page_size: usize) -> Vec<QueryEvent> {
+    let mut events = Vec::new();
+    let fetch = Fetch { page_size, limit };
+    session.fetch_more(fetch, &mut |e| events.push(e)).await;
+    events
+}
+
+/// `(row_count, has_more, in_transaction)` of the final `Done`; panics otherwise.
+pub fn done(events: &[QueryEvent]) -> (u64, bool, bool) {
+    match events.last() {
+        Some(QueryEvent::Done { row_count, has_more, in_transaction, .. }) => (*row_count, *has_more, *in_transaction),
+        other => panic!("expected Done, got {other:?} in {events:?}"),
+    }
+}
+
+fn assert_nothing_open(events: &[QueryEvent]) {
+    assert!(
+        matches!(events, [QueryEvent::Error { message, .. }] if message == NO_OPEN_RESULT),
+        "expected the no-open-result error, got {events:?}"
+    );
+}
+
+/// Reading a result a bit at a time yields exactly the rows of reading it
+/// whole. `sql` must return exactly `total` rows (more than 8) in a stable
+/// order.
+pub async fn fetches_on_demand(session: &mut impl Session, sql: &str, total: usize) {
+    assert!(total > 8, "fetches_on_demand needs more than 8 rows");
+    let whole = rows(&collect(session, sql, 1000).await);
+    assert_eq!(whole.len(), total);
+
+    // The first five rows, in pages of two; the rest stays open.
+    let first = collect_first(session, sql, 5, 2).await;
+    assert!(matches!(first.first(), Some(QueryEvent::Columns { .. })), "{first:?}");
+    for event in &first {
+        if let QueryEvent::Rows { rows } = event {
+            assert!(!rows.is_empty() && rows.len() <= 2, "page of {} rows", rows.len());
+        }
+    }
+    assert_eq!(done(&first), (5, true, false));
+
+    // Three more, then the rest; continuing sends no columns again.
+    let more = collect_more(session, Some(3), 2).await;
+    assert!(!more.iter().any(|e| matches!(e, QueryEvent::Columns { .. })), "{more:?}");
+    assert_eq!(done(&more), (3, true, false));
+    let rest = collect_more(session, None, 1000).await;
+    assert_eq!(done(&rest), ((total - 8) as u64, false, false));
+
+    let pieced: Vec<Row> = [rows(&first), rows(&more), rows(&rest)].concat();
+    assert_eq!(pieced, whole, "reading in pieces must yield the same rows");
+    assert_nothing_open(&collect_more(session, None, 10).await);
+
+    // A result that ends exactly at the limit has nothing more to fetch.
+    let exact = collect_first(session, sql, total, 1000).await;
+    assert_eq!(done(&exact), (total as u64, false, false));
+    assert_eq!(rows(&exact), whole);
+    assert_nothing_open(&collect_more(session, None, 10).await);
+    assert_usable(session).await;
+}
+
+/// An open result is released by `close_result` and by anything else the
+/// session does. `sql` must return more than 2 rows.
+pub async fn closes_open_results(session: &mut impl Session, sql: &str) {
+    let paused = |events: &[QueryEvent]| assert!(done(events).1, "expected an open result: {events:?}");
+
+    paused(&collect_first(session, sql, 2, 10).await);
+    session.close_result().await;
+    assert_nothing_open(&collect_more(session, None, 10).await);
+    // Closing twice, or with nothing open, is fine.
+    session.close_result().await;
+    assert_usable(session).await;
+
+    // Another statement closes it cleanly and runs normally.
+    paused(&collect_first(session, sql, 2, 10).await);
+    assert_eq!(rows(&collect(session, "select 1", 10).await), vec![vec![Value::Int(1)]]);
+    assert_nothing_open(&collect_more(session, None, 10).await);
+
+    // So does checking a statement.
+    paused(&collect_first(session, sql, 2, 10).await);
+    assert_eq!(session.check("select 1", None).await.expect("check"), None);
+    assert_nothing_open(&collect_more(session, None, 10).await);
+    assert_usable(session).await;
+}
+
+/// Cancelling a fetch of the rest stops it and leaves the session usable.
+/// `sql` must return far more rows than one fetch reads quickly (so the
+/// cancel lands while it runs).
+pub async fn cancels_fetch_more(session: &mut impl Session, sql: &str) {
+    let first = collect_first(session, sql, 10, 10).await;
+    assert!(done(&first).1, "expected an open result: {first:?}");
+
+    let canceller = session.canceller();
+    let (mut fetched, mut last) = (0, None);
+    session
+        .fetch_more(Fetch::all(100), &mut |e| {
+            if let QueryEvent::Rows { rows } = &e {
+                fetched += rows.len();
+                let c = canceller.clone();
+                tokio::spawn(async move { c.cancel().await });
+            }
+            last = Some(e);
+        })
+        .await;
+    assert!(matches!(last, Some(QueryEvent::Done { cancelled: true, .. })), "{last:?}");
+    assert!(fetched > 0, "no rows before the cancel");
+    assert_usable(session).await;
+}
+
+/// An open result never becomes a transaction of its own: a paused read
+/// neither swallows nor commits what the user runs around it, and closing it
+/// leaves the user's transaction as it was. Creates `idedb_open_tx` in
+/// `schema`, which must be where unqualified names resolve.
+pub async fn open_results_respect_user_transactions(session: &mut impl Session, schema: &str) {
+    for sql in [
+        "drop table if exists idedb_open_tx",
+        "create table idedb_open_tx (id int primary key, v int not null)",
+        "insert into idedb_open_tx (id, v) values (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 0)",
+    ] {
+        let events = collect(session, sql, 10).await;
+        assert!(matches!(events.last(), Some(QueryEvent::Done { .. })), "{sql}: {events:?}");
+    }
+    let read = "select id from idedb_open_tx order by id";
+    let changed = async |session: &mut _| {
+        rows(&collect(session, "select count(*) from idedb_open_tx where v <> 0", 10).await)
+    };
+    let tx = async |session: &mut _, sql: &str| done(&collect(session, sql, 10).await).2;
+    // With no transaction open a ROLLBACK undoes nothing; SQLite even calls
+    // it an error, the others a warning.
+    let rollback_nothing = async |session: &mut _| {
+        let events = collect(session, "rollback", 10).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(QueryEvent::Done { in_transaction: false, .. } | QueryEvent::Error { in_transaction: false, .. })
+            ),
+            "{events:?}"
+        );
+    };
+
+    // Outside a transaction, a paused read is none the user can see...
+    assert_eq!(done(&collect_first(session, read, 3, 2).await), (3, true, false));
+    // ...and a statement after it commits on its own: the ROLLBACK below
+    // must find nothing to undo.
+    assert!(!tx(session, "update idedb_open_tx set v = 1 where id = 1").await);
+    rollback_nothing(session).await;
+    assert_eq!(changed(session).await, vec![vec![Value::Int(1)]], "the read swallowed the update");
+
+    // The data editor commits too.
+    assert!(done(&collect_first(session, read, 3, 2).await).1);
+    let table = TableRef { schema: schema.into(), name: "idedb_open_tx".into() };
+    let id = |id: i64| vec![ColumnValue { column: "id".into(), value: Value::Int(id) }];
+    let set_v = |v: i64| vec![ColumnValue { column: "v".into(), value: Value::Int(v) }];
+    let outcome = session.apply(&table, &[RowChange::Update { key: id(2), values: set_v(1) }]).await.expect("apply");
+    assert!(matches!(outcome, ApplyOutcome::Applied { in_transaction: false, .. }), "{outcome:?}");
+    rollback_nothing(session).await;
+    assert_eq!(changed(session).await, vec![vec![Value::Int(2)]], "the read swallowed the data editor's change");
+    assert!(!tx(session, "update idedb_open_tx set v = 0").await);
+
+    // Inside the user's transaction, paging and closing commit nothing.
+    assert!(tx(session, "begin").await);
+    assert!(tx(session, "update idedb_open_tx set v = 5 where id = 3").await);
+    assert_eq!(done(&collect_first(session, read, 3, 2).await), (3, true, true));
+    assert_eq!(done(&collect_more(session, Some(3), 2).await), (3, true, true));
+    session.close_result().await;
+    assert!(tx(session, "select 1").await, "closing the result ended the transaction");
+    assert!(!tx(session, "rollback").await);
+    assert_eq!(changed(session).await, vec![vec![Value::Int(0)]], "paging committed the user's transaction");
+
+    // A statement that closes the open result runs inside the transaction.
+    assert!(tx(session, "begin").await);
+    assert!(tx(session, "update idedb_open_tx set v = 6 where id = 4").await);
+    assert!(done(&collect_first(session, read, 3, 2).await).1);
+    assert!(!tx(session, "rollback").await);
+    assert_eq!(changed(session).await, vec![vec![Value::Int(0)]], "closing the read committed the user's transaction");
+
+    // Cancelling a fetch inside the transaction leaves it open and usable.
+    assert!(tx(session, "begin").await);
+    assert!(tx(session, "update idedb_open_tx set v = 7 where id = 5").await);
+    assert!(done(&collect_first(session, read, 2, 1).await).1);
+    let canceller = session.canceller();
+    session
+        .fetch_more(Fetch::all(1), &mut |e| {
+            if matches!(e, QueryEvent::Rows { .. }) {
+                let c = canceller.clone();
+                tokio::spawn(async move { c.cancel().await });
+            }
+        })
+        .await;
+    let inside = collect(session, "select count(*) from idedb_open_tx where v <> 0", 10).await;
+    assert!(done(&inside).2, "a cancelled fetch ended the user's transaction: {inside:?}");
+    assert_eq!(rows(&inside), vec![vec![Value::Int(1)]], "the transaction lost its update");
+    assert!(!tx(session, "rollback").await);
+    assert_eq!(changed(session).await, vec![vec![Value::Int(0)]]);
     assert_usable(session).await;
 }
 

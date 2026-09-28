@@ -1,4 +1,5 @@
 import type { DataEditorRef, GridSelection } from "@glideapps/glide-data-grid";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { openTableData } from "../actions";
 import { api, errorMessage, type Value } from "../db/api";
 import { effectiveSchema, rowGetter, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
@@ -199,6 +200,8 @@ export async function submit() {
   const rowCount = ctx.result.rowCount;
   const { changes, targets } = toChanges(submitted, ctx.getRow, ctx.target.columnNames, ctx.target.keyColumns);
   useGrids.setState((s) => ({ submitting: { ...s.submitting, [resultId]: true } }));
+  // Writing closes the session's open result: rows not loaded yet need a re-run.
+  useConsoles.getState().releaseOpenResults(ctx.entry.id);
   try {
     // Manual transaction mode: the changes go into a transaction, never straight to disk.
     const refused = await beginIfManual(ctx.entry.id, sessionId);
@@ -272,14 +275,30 @@ export async function copySelection(format: CopyFormat) {
 const EXPORT_LABEL: Record<ExportFormat, string> = { tsv: "TSV", csv: "CSV", json: "JSON", sql: "SQL INSERT statements" };
 const EXPORT_CHUNK_ROWS = 5000;
 
-/** Writes every loaded row of the active result to a file the user picks, in chunks. */
+/**
+ * Writes the active result to a file the user picks, in chunks. When rows
+ * are still open on the session, first offers to fetch them all; otherwise
+ * it writes the loaded rows.
+ */
 export async function exportResult(format: ExportFormat) {
   const grid = activeGrid();
   const engine = grid && engineOf(grid.entry);
   if (!grid || !engine) return;
-  const { result } = grid;
   const extension = EXPORT_EXTENSION[format];
-  const notice = (message: string) => useGrids.setState((s) => ({ notices: { ...s.notices, [result.id]: message } }));
+  const notice = (message: string) => useGrids.setState((s) => ({ notices: { ...s.notices, [grid.result.id]: message } }));
+
+  if (grid.result.more === "open") {
+    const fetchAll = await ask(`Only ${grid.result.rowCount.toLocaleString("en-US")} rows are loaded.`, {
+      title: "Fetch all rows before exporting?",
+      okLabel: "Fetch All",
+      cancelLabel: "Export Loaded Rows",
+    });
+    if (fetchAll) await useConsoles.getState().fetchMore(grid.entry.id, grid.result.id, true);
+  }
+  const result = useConsoles.getState().consoles[grid.entry.id]?.results.find((r) => r.id === grid.result.id);
+  if (!result) return;
+  // A cancelled fetch leaves rows behind: say so rather than export them silently short.
+  const partial = result.more !== "none" ? " (not all rows: re-run and fetch all to include the rest)" : "";
   let target: { token: number; fileName: string } | null;
   try {
     target = await api.exportBegin(`${result.table?.name ?? "result"}.${extension}`, EXPORT_LABEL[format], extension);
@@ -317,7 +336,7 @@ export async function exportResult(format: ExportFormat) {
       }
       await api.exportWrite(target.token, chunk);
     }
-    notice(`Exported ${total.toLocaleString("en-US")} rows to ${target.fileName}`);
+    notice(`Exported ${total.toLocaleString("en-US")} rows to ${target.fileName}${partial}`);
   } catch (e) {
     notice(`Export failed: ${errorMessage(e)}`);
   } finally {

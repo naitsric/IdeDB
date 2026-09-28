@@ -11,8 +11,9 @@ import {
 } from "../actions";
 import { editorFor } from "../editor/registry";
 import { revealInExplorer } from "../explorer/reveal";
-import { isRunning, useConsoles } from "../db/consoles";
+import { activeResult, isRunning, useConsoles } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
+import { useFetchSettings } from "../db/fetching";
 import { qualifiedName, quoteIdent } from "../db/sql";
 import {
   confirmEndTransactions,
@@ -76,6 +77,14 @@ const hasGridSelection = () => {
 const selectedRowsInActive = () => {
   const grid = activeGrid();
   return grid ? selectedRows(useGrids.getState().selections[grid.result.id]) : [];
+};
+/** The result with rows still open to fetch: the focused grid's, else the active console's. */
+const resultWithRest = () => {
+  const grid = activeGrid();
+  const entry = grid?.entry ?? activeConsole();
+  const result = grid?.result ?? activeResult(entry);
+  if (!entry || !result || result.more !== "open" || isRunning(entry)) return undefined;
+  return { consoleId: entry.id, resultId: result.id };
 };
 
 /** Every app-wide command. Panels only render; behavior lives here and in actions.ts. */
@@ -451,6 +460,46 @@ export function registerAppCommands(): () => void {
       },
       run: () => exportResult(format),
     })),
+    {
+      id: "results.fetchNext",
+      title: "Fetch Next Page",
+      category: "Results",
+      keywords: ["more rows", "load", "paginate"],
+      enabled: () => resultWithRest() !== undefined,
+      run: () => {
+        const target = resultWithRest();
+        if (target) return useConsoles.getState().fetchMore(target.consoleId, target.resultId);
+      },
+    },
+    {
+      id: "results.fetchAll",
+      title: "Fetch All Rows",
+      category: "Results",
+      keywords: ["more rows", "load", "everything"],
+      enabled: () => resultWithRest() !== undefined,
+      run: () => {
+        const target = resultWithRest();
+        if (target) return useConsoles.getState().fetchMore(target.consoleId, target.resultId, true);
+      },
+    },
+    {
+      id: "results.closeResultSet",
+      title: "Close Result Set",
+      category: "Results",
+      keywords: ["release", "cursor", "stop fetching"],
+      enabled: () => resultWithRest() !== undefined,
+      run: () => {
+        const target = resultWithRest();
+        if (target) return useConsoles.getState().closeCursor(target.consoleId);
+      },
+    },
+    {
+      id: "results.pageSize",
+      title: "Result Page Size…",
+      category: "Results",
+      keywords: ["fetch size", "rows", "limit", "settings"],
+      run: () => useFetchSettings.setState({ dialogOpen: true }),
+    },
     {
       id: "grid.valueViewer",
       title: "Value Viewer",

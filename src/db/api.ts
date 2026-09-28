@@ -80,8 +80,19 @@ export interface Column {
 export type QueryEvent =
   | { kind: "columns"; columns: Column[] }
   | { kind: "rows"; rows: Value[][] }
-  /** `inTransaction`: the user has a transaction open after the statement (BEGIN, or autocommit off). */
-  | { kind: "done"; rowCount: number; elapsedMs: number; cancelled: boolean; inTransaction: boolean }
+  /**
+   * `rowCount`: rows of this call (or affected, for DML). `hasMore`: reading
+   * paused at the fetch limit and the rest is open for `fetchMore`.
+   * `inTransaction`: the user has a transaction open after the statement (BEGIN, or autocommit off).
+   */
+  | {
+      kind: "done";
+      rowCount: number;
+      elapsedMs: number;
+      cancelled: boolean;
+      hasMore: boolean;
+      inTransaction: boolean;
+    }
   /** `position`: code points into the statement where the engine located the error. */
   | { kind: "error"; message: string; position: number | null; inTransaction: boolean };
 
@@ -225,16 +236,30 @@ export const api = {
     invoke<HistoryEntry[]>("history_list", { dataSourceId, search, limit }),
 
   /**
-   * Runs one statement. Events arrive in order as MessagePack over a Tauri
-   * channel; the promise resolves after the final `done` or `error`.
+   * Runs one statement. With `firstRows`, reads only that many rows and
+   * leaves the rest open on the session for `fetchMore`; `null` reads it
+   * all. Events arrive in order as MessagePack over a Tauri channel; the
+   * promise resolves after the final `done` or `error`.
    */
-  execute(id: SessionId, sql: string, onEvent: (event: QueryEvent) => void): Promise<void> {
-    const channel = new Channel<ArrayBuffer>();
-    channel.onmessage = (buffer) => {
-      const event = decode(new Uint8Array(buffer), { useBigInt64: true }) as QueryEvent;
-      if (event.kind === "done") event.rowCount = Number(event.rowCount);
-      onEvent(event);
-    };
-    return invoke("session_execute", { id, sql, onEvent: channel });
+  execute(id: SessionId, sql: string, firstRows: number | null, onEvent: (event: QueryEvent) => void): Promise<void> {
+    return invoke("session_execute", { id, sql, firstRows, onEvent: eventChannel(onEvent) });
   },
+
+  /** Continues the session's open result: `rows` more, or `null` for all the rest. */
+  fetchMore(id: SessionId, rows: number | null, onEvent: (event: QueryEvent) => void): Promise<void> {
+    return invoke("session_fetch_more", { id, rows, onEvent: eventChannel(onEvent) });
+  },
+
+  /** Releases the session's open result without reading the rest. */
+  closeResult: (id: SessionId) => invoke<void>("session_close_result", { id }),
 };
+
+function eventChannel(onEvent: (event: QueryEvent) => void): Channel<ArrayBuffer> {
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = (buffer) => {
+    const event = decode(new Uint8Array(buffer), { useBigInt64: true }) as QueryEvent;
+    if (event.kind === "done") event.rowCount = Number(event.rowCount);
+    onEvent(event);
+  };
+  return channel;
+}

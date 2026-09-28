@@ -10,6 +10,13 @@
 //! Whether the user has a transaction open comes from the server's own
 //! status flags (`SERVER_STATUS_IN_TRANS`, `SERVER_STATUS_AUTOCOMMIT`),
 //! which every OK packet and result-set terminator carries.
+//!
+//! A read with a fetch limit pauses by simply not reading on: the rest of
+//! the result stays pending on the connection (mysql_async keeps it in the
+//! `Conn`, not in the borrowed `QueryResult`), and the server waits on the
+//! socket holding the statement's locks. Nothing else can use the connection
+//! meanwhile, so anything the session does first reads out a small rest, or
+//! stops the server with `KILL QUERY` and reads to the error it causes.
 
 mod apply;
 mod decode;
@@ -20,12 +27,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use idedb_core::{
-    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, QueryEvent, Result, Row,
-    RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode, TableRef,
+    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged, Pager,
+    QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
+    TableRef,
 };
 use mysql_async::consts::StatusFlags;
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
+use mysql_async::{Conn, Opts, OptsBuilder, QueryResult, SslOpts, TextProtocol};
 use tokio::sync::Notify;
 
 use crate::decode::Kind;
@@ -37,6 +45,10 @@ const QUERY_INTERRUPTED: u16 = 1317;
 const NO_SUCH_THREAD: u16 = 1094;
 /// `ER_UNSUPPORTED_PS`: the statement cannot be prepared, only run.
 const UNSUPPORTED_PS: u16 = 1295;
+/// Rows of a paused result read and dropped before closing it with
+/// `KILL QUERY` instead: cheaper than a second connection when little is
+/// left, bounded when a lot is.
+const DRAIN_BUDGET: usize = 10_000;
 
 pub struct MySqlSession {
     conn: Conn,
@@ -51,6 +63,21 @@ pub struct MySqlSession {
     broken: bool,
     /// Whether the user had a transaction open after the last statement.
     in_transaction: bool,
+    /// A read paused at its fetch limit; its rows are still pending on `conn`.
+    open: Option<OpenResult>,
+}
+
+struct OpenResult {
+    /// How to decode each column of the pending rows.
+    kinds: Vec<Kind>,
+    /// The row read past the last fetch's limit, first in line for the next.
+    held: Option<Row>,
+}
+
+/// What reading the pending result did.
+struct Pumped {
+    rows: u64,
+    has_more: bool,
 }
 
 /// Cancels the statement currently running on a session. Cloneable so it can
@@ -186,6 +213,7 @@ impl MySqlSession {
             database: None,
             broken: false,
             in_transaction: false,
+            open: None,
         };
         let (version, database): (String, Option<String>) = session
             .conn
@@ -231,6 +259,8 @@ impl MySqlSession {
         self.conn = conn;
         self.broken = false;
         self.in_transaction = false;
+        // Whatever was paused went with the old connection.
+        self.open = None;
         Ok(())
     }
 
@@ -247,15 +277,15 @@ impl MySqlSession {
     async fn run(
         &mut self,
         sql: &str,
-        page_size: usize,
+        fetch: Fetch,
         emit: &mut (dyn FnMut(QueryEvent) + Send),
-    ) -> Result<u64, mysql_async::Error> {
-        let mut result = self.conn.query_iter(sql).await?;
+    ) -> Result<Pumped, mysql_async::Error> {
+        let result = self.conn.query_iter(sql).await?;
 
         let Some(columns) = result.columns().filter(|c| !c.is_empty()) else {
             let affected = result.affected_rows();
             result.drop_result().await?;
-            return Ok(affected);
+            return Ok(Pumped { rows: affected, has_more: false });
         };
 
         emit(QueryEvent::Columns {
@@ -268,42 +298,126 @@ impl MySqlSession {
                 .collect(),
         });
         let kinds: Vec<Kind> = columns.iter().map(Kind::of).collect();
-        let decode = |row: mysql_async::Row| -> Row {
-            row.unwrap_raw()
-                .into_iter()
-                .zip(&kinds)
-                .map(|(value, kind)| value.map_or(idedb_core::Value::Null, |v| kind.decode(v)))
-                .collect()
-        };
+        // The rows stay pending on the connection; `pump` reads them.
+        drop(result);
+        self.open = Some(OpenResult { kinds, held: None });
+        self.pump(fetch, emit).await
+    }
 
-        let mut total = 0u64;
-        let mut page = Vec::with_capacity(page_size.min(4096));
-        loop {
-            let Some(row) = result.next().await? else {
-                break;
-            };
-            page.push(decode(row));
-            if page.len() == page_size {
-                if self.cancel.requested.load(Ordering::SeqCst) {
-                    // The KILL already sent ends the stream server-side;
-                    // what is still in flight is read and discarded.
-                    while let Ok(Some(_)) = result.next().await {}
-                    return Ok(total);
+    /// Reads the pending result up to the fetch limit (to its end without
+    /// one). Leaves it pending when the limit stops the read; otherwise
+    /// finishes it, and any further result sets, so the connection is clean.
+    /// A cancel has sent `KILL QUERY`, which ends the stream server-side:
+    /// what is still in flight is read and dropped.
+    async fn pump(&mut self, fetch: Fetch, emit: &mut (dyn FnMut(QueryEvent) + Send)) -> Result<Pumped, mysql_async::Error> {
+        let Some(open) = self.open.as_mut() else { return Ok(Pumped { rows: 0, has_more: false }) };
+        let kinds = open.kinds.clone();
+        let held = open.held.take();
+        let mut pager = Pager::new(fetch);
+        let mut emitted = 0u64;
+        let mut send = |rows: Vec<Row>, emit: &mut (dyn FnMut(QueryEvent) + Send)| {
+            if !rows.is_empty() {
+                emitted += rows.len() as u64;
+                emit(QueryEvent::Rows { rows });
+            }
+        };
+        if let Some(row) = held {
+            match pager.push(row) {
+                Paged::Continue => {}
+                Paged::Page(rows) => send(rows, emit),
+                Paged::Overflow(row) => {
+                    open.held = Some(row);
+                    return Ok(Pumped { rows: 0, has_more: true });
                 }
-                total += page.len() as u64;
-                emit(QueryEvent::Rows {
-                    rows: std::mem::replace(&mut page, Vec::with_capacity(page_size.min(4096))),
-                });
             }
         }
-        if !page.is_empty() && !self.cancel.requested.load(Ordering::SeqCst) {
-            total += page.len() as u64;
-            emit(QueryEvent::Rows { rows: page });
+
+        let requested = &self.cancel.requested;
+        let mut result = QueryResult::<'_, '_, TextProtocol>::new(&mut self.conn);
+        loop {
+            let row = match result.next().await {
+                Ok(Some(row)) => decode_row(row, &kinds),
+                Ok(None) => break,
+                Err(e) => {
+                    self.open = None;
+                    return Err(e);
+                }
+            };
+            match pager.push(row) {
+                Paged::Continue => {}
+                Paged::Page(rows) => {
+                    if requested.load(Ordering::SeqCst) {
+                        while let Ok(Some(_)) = result.next().await {}
+                        self.open = None;
+                        return Ok(Pumped { rows: emitted, has_more: false });
+                    }
+                    send(rows, emit);
+                }
+                Paged::Overflow(row) => {
+                    send(pager.finish(), emit);
+                    if let Some(open) = self.open.as_mut() {
+                        open.held = Some(row);
+                    }
+                    return Ok(Pumped { rows: emitted, has_more: true });
+                }
+            }
         }
-        // Consume any further result sets so the connection is clean.
+        if !requested.load(Ordering::SeqCst) {
+            send(pager.finish(), emit);
+        }
+        self.open = None;
         result.drop_result().await?;
-        Ok(total)
+        Ok(Pumped { rows: emitted, has_more: false })
     }
+
+    /// Releases a paused result (see [`Session::close_result`]): reads out a
+    /// small rest, or stops the server with `KILL QUERY` and reads to the
+    /// error it causes. Then asks the server what state the finished
+    /// statement left the session in.
+    async fn close_open(&mut self) {
+        if self.open.take().is_none() || self.broken {
+            return;
+        }
+        let cancel = self.cancel.clone();
+        let mut killed = false;
+        let mut read = 0usize;
+        let mut result = QueryResult::<'_, '_, TextProtocol>::new(&mut self.conn);
+        let ended = loop {
+            match result.next().await {
+                Ok(Some(_)) => {
+                    read += 1;
+                    if read == DRAIN_BUDGET {
+                        killed = true;
+                        // Best effort: without it the rest is read out instead.
+                        let _ = cancel.kill_query().await;
+                    }
+                }
+                Ok(None) => break result.drop_result().await,
+                Err(e) => break Err(e),
+            }
+        };
+        if ended.as_ref().is_err_and(connection_lost) {
+            self.broken = true;
+            return;
+        }
+        // A KILL that raced the end of the result may still be pending on the
+        // session: let a no-op absorb it rather than the user's next statement.
+        if killed && self.conn.query_drop("DO 0").await.as_ref().is_err_and(connection_lost) {
+            self.broken = true;
+            return;
+        }
+        if self.refresh_state().await.is_err() {
+            self.broken = true;
+        }
+    }
+}
+
+fn decode_row(row: mysql_async::Row, kinds: &[Kind]) -> Row {
+    row.unwrap_raw()
+        .into_iter()
+        .zip(kinds)
+        .map(|(value, kind)| value.map_or(idedb_core::Value::Null, |v| kind.decode(v)))
+        .collect()
 }
 
 impl Session for MySqlSession {
@@ -322,9 +436,10 @@ impl Session for MySqlSession {
     async fn execute(
         &mut self,
         sql: &str,
-        page_size: usize,
+        fetch: Fetch,
         emit: &mut (dyn FnMut(QueryEvent) + Send),
     ) {
+        self.close_open().await;
         // A statement never runs on a connection that replaced a lost one
         // without the user hearing about it: what was lost (an open
         // transaction, temporary tables, variables) could change its meaning.
@@ -340,60 +455,38 @@ impl Session for MySqlSession {
 
         self.cancel.begin();
         let started = Instant::now();
-        let outcome = self.run(sql, page_size.max(1), emit).await;
+        let fetch = Fetch { page_size: fetch.page_size.max(1), ..fetch };
+        let outcome = self.run(sql, fetch, emit).await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         self.cancel.end().await;
+        self.finish_call(outcome, elapsed_ms, Some(sql), emit).await;
+    }
 
-        if let Err(e) = &outcome {
-            self.broken |= connection_lost(e);
-        }
-        // Any statement may have changed the database or the transaction
-        // state (USE, BEGIN, COMMIT, a deadlock rollback, ...): ask the server.
-        if !self.broken && self.refresh_state().await.is_err() {
-            self.broken = true;
-        }
-        // Reconnect right away so the next statement runs normally; the
-        // error below tells the user what the lost connection took with it.
-        let lost = if self.broken { Some(self.recover().await) } else { None };
-        let in_transaction = self.in_transaction;
-
-        // An interrupted SLEEP() returns normally, so the request flag, not
-        // the outcome, decides whether the statement was cancelled.
-        let cancelled = self.cancel.requested.load(Ordering::SeqCst);
-        if let Some(notice) = lost {
-            let cause = outcome.err().map(|e| format_error(&e)).unwrap_or_default();
-            emit(QueryEvent::Error {
-                message: format!("{cause}\n{notice} The statement may or may not have completed."),
-                position: None,
-                in_transaction,
-            });
+    async fn fetch_more(&mut self, fetch: Fetch, emit: &mut (dyn FnMut(QueryEvent) + Send)) {
+        if self.open.is_none() {
+            emit(QueryEvent::Error { message: NO_OPEN_RESULT.into(), position: None, in_transaction: self.in_transaction });
             return;
         }
-        emit(match outcome {
-            Ok(row_count) => QueryEvent::Done {
-                row_count,
-                elapsed_ms,
-                cancelled,
-                in_transaction,
-            },
-            Err(e) if cancelled || server_code(&e) == Some(QUERY_INTERRUPTED) => QueryEvent::Done {
-                row_count: 0,
-                elapsed_ms,
-                cancelled: true,
-                in_transaction,
-            },
-            Err(e) => {
-                let message = format_error(&e);
-                QueryEvent::Error {
-                    position: near_position(sql, &message),
-                    message,
-                    in_transaction,
-                }
-            }
-        });
+        if self.broken {
+            let notice = self.recover().await;
+            emit(QueryEvent::Error { message: format!("{NO_OPEN_RESULT}\n{notice}"), position: None, in_transaction: false });
+            return;
+        }
+        self.cancel.begin();
+        let started = Instant::now();
+        let fetch = Fetch { page_size: fetch.page_size.max(1), ..fetch };
+        let outcome = self.pump(fetch, emit).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        self.cancel.end().await;
+        self.finish_call(outcome, elapsed_ms, None, emit).await;
+    }
+
+    async fn close_result(&mut self) {
+        self.close_open().await;
     }
 
     async fn schemas(&mut self) -> Result<Vec<SchemaInfo>> {
+        self.close_open().await;
         self.ensure_connected().await?;
         introspect::schemas(&mut self.conn)
             .await
@@ -401,6 +494,7 @@ impl Session for MySqlSession {
     }
 
     async fn introspect(&mut self, schema: &str) -> Result<SchemaModel> {
+        self.close_open().await;
         self.ensure_connected().await?;
         introspect::introspect(&mut self.conn, schema)
             .await
@@ -408,6 +502,7 @@ impl Session for MySqlSession {
     }
 
     async fn apply(&mut self, table: &TableRef, changes: &[RowChange]) -> Result<ApplyOutcome> {
+        self.close_open().await;
         // Changes meant for a transaction the lost connection took along
         // must not be committed on their own on a fresh one.
         if self.broken {
@@ -426,6 +521,7 @@ impl Session for MySqlSession {
     /// (it only ever serves checks and introspection, which name schemas
     /// explicitly).
     async fn check(&mut self, sql: &str, schema: Option<&str>) -> Result<Option<SqlProblem>> {
+        self.close_open().await;
         self.ensure_connected().await?;
         if let Some(schema) = schema {
             self.set_schema(schema).await?;
@@ -445,6 +541,7 @@ impl Session for MySqlSession {
     }
 
     async fn set_schema(&mut self, schema: &str) -> Result<()> {
+        self.close_open().await;
         self.ensure_connected().await?;
         if self.database.as_deref() == Some(schema) {
             return Ok(());
@@ -474,6 +571,68 @@ fn near_position(sql: &str, message: &str) -> Option<u32> {
 }
 
 impl MySqlSession {
+    /// Reports how a statement or a fetch ended, after bringing the session
+    /// state up to date. `sql` locates syntax errors (statements only).
+    async fn finish_call(
+        &mut self,
+        outcome: Result<Pumped, mysql_async::Error>,
+        elapsed_ms: u64,
+        sql: Option<&str>,
+        emit: &mut (dyn FnMut(QueryEvent) + Send),
+    ) {
+        if let Err(e) = &outcome {
+            self.broken |= connection_lost(e);
+        }
+        // Any statement may have changed the database or the transaction
+        // state (USE, BEGIN, COMMIT, a deadlock rollback, ...): ask the
+        // server, unless a paused result still holds the connection (only
+        // reads pause, and a read changes neither).
+        if !self.broken && self.open.is_none() && self.refresh_state().await.is_err() {
+            self.broken = true;
+        }
+        // Reconnect right away so the next statement runs normally; the
+        // error below tells the user what the lost connection took with it.
+        let lost = if self.broken { Some(self.recover().await) } else { None };
+        let in_transaction = self.in_transaction;
+
+        // An interrupted SLEEP() returns normally, so the request flag, not
+        // the outcome, decides whether the statement was cancelled.
+        let cancelled = self.cancel.requested.load(Ordering::SeqCst);
+        if let Some(notice) = lost {
+            let cause = outcome.err().map(|e| format_error(&e)).unwrap_or_default();
+            emit(QueryEvent::Error {
+                message: format!("{cause}\n{notice} The statement may or may not have completed."),
+                position: None,
+                in_transaction,
+            });
+            return;
+        }
+        emit(match outcome {
+            Ok(pumped) => QueryEvent::Done {
+                row_count: pumped.rows,
+                elapsed_ms,
+                cancelled,
+                has_more: pumped.has_more,
+                in_transaction,
+            },
+            Err(e) if cancelled || server_code(&e) == Some(QUERY_INTERRUPTED) => QueryEvent::Done {
+                row_count: 0,
+                elapsed_ms,
+                cancelled: true,
+                has_more: false,
+                in_transaction,
+            },
+            Err(e) => {
+                let message = format_error(&e);
+                QueryEvent::Error {
+                    position: sql.and_then(|sql| near_position(sql, &message)),
+                    message,
+                    in_transaction,
+                }
+            }
+        });
+    }
+
     async fn ensure_connected(&mut self) -> Result<()> {
         if self.broken {
             self.reconnect()

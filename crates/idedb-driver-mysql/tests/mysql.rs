@@ -116,6 +116,63 @@ async fn cancels_between_pages() {
 }
 
 #[tokio::test]
+async fn fetches_on_demand() {
+    let Some(mut s) = session().await else { return };
+    testing::fetches_on_demand(
+        &mut s,
+        "with recursive seq(n) as (select 1 union all select n + 1 from seq where n < 23) select n from seq",
+        23,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn closes_open_results() {
+    let Some(mut s) = session().await else { return };
+    testing::closes_open_results(
+        &mut s,
+        "with recursive seq(n) as (select 1 union all select n + 1 from seq where n < 10) select n from seq",
+    )
+    .await;
+}
+
+const MILLION_ROWS: &str = "with recursive seq(n) as (select 1 union all select n + 1 from seq where n < 1000000)
+     select n, md5(n) from seq";
+
+/// With much left, closing stops the server with `KILL QUERY` instead of
+/// reading it all, and the kill never reaches the statement that follows.
+#[tokio::test]
+async fn closes_a_large_open_result_quickly() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["set session cte_max_recursion_depth = 10000000"]).await;
+    for _ in 0..3 {
+        let first = testing::collect_first(&mut s, MILLION_ROWS, 10, 10).await;
+        assert!(testing::done(&first).1, "{first:?}");
+        let started = std::time::Instant::now();
+        s.close_result().await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "closing took {:?}", started.elapsed());
+        testing::assert_usable(&mut s).await;
+    }
+    // A new statement closes it the same way.
+    let first = testing::collect_first(&mut s, MILLION_ROWS, 10, 10).await;
+    assert!(testing::done(&first).1, "{first:?}");
+    assert_eq!(rows(&collect(&mut s, "select 2", 10).await), vec![vec![Value::Int(2)]]);
+}
+
+#[tokio::test]
+async fn cancels_fetch_more() {
+    let Some(mut s) = session().await else { return };
+    run_all(&mut s, &["set session cte_max_recursion_depth = 10000000"]).await;
+    testing::cancels_fetch_more(&mut s, MILLION_ROWS).await;
+}
+
+#[tokio::test]
+async fn open_results_respect_user_transactions() {
+    let Some(mut s) = session().await else { return };
+    testing::open_results_respect_user_transactions(&mut s, "idedb").await;
+}
+
+#[tokio::test]
 async fn reports_affected_rows_and_errors() {
     let Some(mut s) = session().await else { return };
     run_all(&mut s, &["drop table if exists idedb_affected"]).await;

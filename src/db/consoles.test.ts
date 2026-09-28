@@ -4,16 +4,33 @@ import type { QueryEvent } from "./api";
 
 /** What the mocked backend answers per statement text. */
 const replies = new Map<string, QueryEvent[]>();
+/** What successive fetches of more rows answer, in order. */
+const fetchReplies: QueryEvent[][] = [];
+
+const done = (rowCount: number, extra: Partial<Extract<QueryEvent, { kind: "done" }>> = {}): QueryEvent => ({
+  kind: "done",
+  rowCount,
+  elapsedMs: 1,
+  cancelled: false,
+  hasMore: false,
+  inTransaction: false,
+  ...extra,
+});
 
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   api: {
-    execute: vi.fn(async (_session: number, sql: string, onEvent: (e: QueryEvent) => void) => {
-      const done: QueryEvent = { kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false, inTransaction: false };
-      for (const event of replies.get(sql) ?? [done]) {
+    execute: vi.fn(async (_session: number, sql: string, _firstRows: number | null, onEvent: (e: QueryEvent) => void) => {
+      for (const event of replies.get(sql) ?? [done(0)]) {
         onEvent(event);
       }
     }),
+    fetchMore: vi.fn(async (_session: number, _rows: number | null, onEvent: (e: QueryEvent) => void) => {
+      for (const event of fetchReplies.shift() ?? []) {
+        onEvent(event);
+      }
+    }),
+    closeResult: vi.fn(async () => {}),
     cancel: vi.fn(async () => {}),
     closeSession: vi.fn(async () => {}),
   },
@@ -34,11 +51,11 @@ vi.mock("./dataSources", () => ({
 const { api } = await import("./api");
 const { activeResult, rowGetter, setPendingChangesProbe, useConsoles } = await import("./consoles");
 
-const rows = (sql: string, values: number[]) =>
+const rows = (sql: string, values: number[], hasMore = false) =>
   replies.set(sql, [
     { kind: "columns", columns: [{ name: "n", typeName: "int4" }] },
     { kind: "rows", rows: values.map((v) => [v]) },
-    { kind: "done", rowCount: values.length, elapsedMs: 3, cancelled: false, inTransaction: false },
+    done(values.length, { hasMore }),
   ]);
 
 let consoleId = "";
@@ -59,9 +76,9 @@ describe("opening the console's session", () => {
     openSessionFor.mockImplementationOnce(() => new Promise((r) => (resolve = r)));
     vi.mocked(api.execute).mockClear();
     // A real statement streams for a while; the second run must not replace it.
-    vi.mocked(api.execute).mockImplementationOnce(async (_id, _sql, onEvent) => {
+    vi.mocked(api.execute).mockImplementationOnce(async (_id, _sql, _firstRows, onEvent) => {
       await new Promise((r) => setTimeout(r, 0));
-      onEvent({ kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false, inTransaction: false });
+      onEvent(done(0));
     });
     const { runStatement } = useConsoles.getState();
 
@@ -162,7 +179,7 @@ describe("result tabs", () => {
   });
 
   it("tracks whether the session has a transaction open", async () => {
-    replies.set("begin", [{ kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false, inTransaction: true }]);
+    replies.set("begin", [done(0, { inTransaction: true })]);
     replies.set("select 1/0", [{ kind: "error", message: "division by zero", position: null, inTransaction: true }]);
     const { runStatement } = useConsoles.getState();
     await runStatement(consoleId, "begin");
@@ -204,5 +221,72 @@ describe("result tabs", () => {
     const result = await useConsoles.getState().runStatement(consoleId, "select 1");
     await useConsoles.getState().remove(consoleId);
     expect(rowGetter(result!.id)(0)).toBeUndefined();
+  });
+});
+
+describe("fetching on demand", () => {
+  beforeEach(() => {
+    fetchReplies.length = 0;
+  });
+
+  it("asks for the first page only and remembers that more rows are open", async () => {
+    rows("select big", [1, 2], true);
+    vi.mocked(api.execute).mockClear();
+    const result = await useConsoles.getState().runStatement(consoleId, "select big");
+    expect(api.execute).toHaveBeenCalledWith(expect.any(Number), "select big", 500, expect.any(Function));
+    expect(result).toMatchObject({ rowCount: 2, more: "open" });
+  });
+
+  it("appends fetched rows in place until the rest runs out", async () => {
+    rows("select big", [1, 2], true);
+    const result = await useConsoles.getState().runStatement(consoleId, "select big");
+    fetchReplies.push([{ kind: "rows", rows: [[3], [4]] }, done(2, { hasMore: true })]);
+    fetchReplies.push([{ kind: "rows", rows: [[5]] }, done(1)]);
+
+    await useConsoles.getState().fetchMore(consoleId, result!.id);
+    expect(activeResult(entry())).toMatchObject({ rowCount: 4, more: "open", fetching: undefined });
+    await useConsoles.getState().fetchMore(consoleId, result!.id, true);
+    expect(api.fetchMore).toHaveBeenLastCalledWith(expect.any(Number), null, expect.any(Function));
+    expect(activeResult(entry())).toMatchObject({ rowCount: 5, more: "none" });
+    expect([0, 1, 2, 3, 4].map((i) => rowGetter(result!.id)(i))).toEqual([[1], [2], [3], [4], [5]]);
+  });
+
+  it("does not fetch when nothing is open", async () => {
+    rows("select 1", [1]);
+    const result = await useConsoles.getState().runStatement(consoleId, "select 1");
+    vi.mocked(api.fetchMore).mockClear();
+    await useConsoles.getState().fetchMore(consoleId, result!.id);
+    expect(api.fetchMore).not.toHaveBeenCalled();
+  });
+
+  it("marks the rest released when the session runs something else", async () => {
+    rows("select big", [1, 2], true);
+    const { runStatement } = useConsoles.getState();
+    const first = await runStatement(consoleId, "select big");
+    useConsoles.getState().togglePin(consoleId, first!.id);
+    await runStatement(consoleId, "select 1");
+    expect(entry().results.find((r) => r.id === first!.id)).toMatchObject({ more: "closed" });
+  });
+
+  it("shows why a fetch failed and stops offering more", async () => {
+    rows("select big", [1, 2], true);
+    const result = await useConsoles.getState().runStatement(consoleId, "select big");
+    fetchReplies.push([{ kind: "error", message: "The result is no longer open", position: null, inTransaction: false }]);
+    await useConsoles.getState().fetchMore(consoleId, result!.id);
+    expect(activeResult(entry())).toMatchObject({ more: "closed", fetchError: "The result is no longer open", rowCount: 2 });
+  });
+
+  it("releases the rest on request and when its tab closes", async () => {
+    rows("select big", [1, 2], true);
+    const { runStatement, closeCursor, closeResult } = useConsoles.getState();
+    await runStatement(consoleId, "select big");
+    vi.mocked(api.closeResult).mockClear();
+    await closeCursor(consoleId);
+    expect(api.closeResult).toHaveBeenCalledTimes(1);
+    expect(activeResult(entry())?.more).toBe("closed");
+
+    const reopened = await runStatement(consoleId, "select big");
+    await closeResult(consoleId, reopened!.id);
+    expect(api.closeResult).toHaveBeenCalledTimes(2);
   });
 });

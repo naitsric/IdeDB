@@ -54,6 +54,8 @@ pub fn run() {
             sessions::session_open,
             sessions::session_close,
             sessions::session_execute,
+            sessions::session_fetch_more,
+            sessions::session_close_result,
             sessions::session_cancel,
             sessions::session_schemas,
             sessions::session_introspect,

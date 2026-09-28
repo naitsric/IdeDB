@@ -12,7 +12,7 @@ const executed: string[] = [];
 vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./api")>()),
   api: {
-    execute: vi.fn(async (_session: number, sql: string, onEvent: (e: QueryEvent) => void) => {
+    execute: vi.fn(async (_session: number, sql: string, _firstRows: number | null, onEvent: (e: QueryEvent) => void) => {
       executed.push(sql);
       if (server.lost.has(sql)) {
         server.inTransaction = false;
@@ -32,8 +32,21 @@ vi.mock("./api", async (importOriginal) => ({
       if (/^(begin|start transaction)$/i.test(sql)) server.inTransaction = true;
       else if (/^(commit|rollback)$/i.test(sql)) server.inTransaction = false;
       else if (/^create /i.test(sql)) server.inTransaction = false; // implicit commit, as MySQL does for DDL
-      onEvent({ kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false, inTransaction: server.inTransaction });
+      if (/^select /i.test(sql)) {
+        // A read larger than a page: the rest stays open on the session.
+        onEvent({ kind: "columns", columns: [{ name: "a", typeName: "int4" }] });
+        onEvent({ kind: "rows", rows: [[1], [2]] });
+        onEvent({ kind: "done", rowCount: 2, elapsedMs: 1, cancelled: false, hasMore: true, inTransaction: server.inTransaction });
+        return;
+      }
+      onEvent({ kind: "done", rowCount: 0, elapsedMs: 1, cancelled: false, hasMore: false, inTransaction: server.inTransaction });
     }),
+    fetchMore: vi.fn(async (_session: number, _rows: number | null, onEvent: (e: QueryEvent) => void) => {
+      executed.push("<fetch more>");
+      onEvent({ kind: "rows", rows: [[3]] });
+      onEvent({ kind: "done", rowCount: 1, elapsedMs: 1, cancelled: false, hasMore: true, inTransaction: server.inTransaction });
+    }),
+    closeResult: vi.fn(async () => {}),
     cancel: vi.fn(async () => {}),
     closeSession: vi.fn(async () => {}),
   },
@@ -301,5 +314,41 @@ describe("guard rails", () => {
     message.mockResolvedValueOnce("Commit");
     await quitApp();
     expect(invoke).toHaveBeenCalledWith("app_quit");
+  });
+});
+
+describe("with results read a page at a time", () => {
+  const firstResult = () => entry().results[0];
+
+  it("releases a result's open rest before Commit or Rollback", async () => {
+    setMode(consoleId, "manual");
+    await run("select * from t");
+    expect(executed).toEqual(["begin", "select * from t"]);
+    expect(firstResult().more).toBe("open");
+
+    expect(await endTransaction(consoleId, "commit")).toBe(true);
+    // The session closed the rest before COMMIT; the grid must stop offering it.
+    expect(firstResult().more).toBe("closed");
+    await useConsoles.getState().fetchMore(consoleId, firstResult().id);
+    expect(executed).toEqual(["begin", "select * from t", "commit"]);
+  });
+
+  it("releases the previous result before a manual transaction opens", async () => {
+    await run("select * from t");
+    useConsoles.getState().togglePin(consoleId, firstResult().id);
+    setMode(consoleId, "manual");
+    await run("update t set a = 1");
+    expect(executed).toEqual(["select * from t", "begin", "update t set a = 1"]);
+    expect(firstResult().more).toBe("closed");
+  });
+
+  it("keeps the transaction open and uncounted while fetching more", async () => {
+    setMode(consoleId, "manual");
+    await run("select * from t");
+    await useConsoles.getState().fetchMore(consoleId, firstResult().id);
+    expect(executed).toEqual(["begin", "select * from t", "<fetch more>"]);
+    expect(firstResult()).toMatchObject({ rowCount: 3, more: "open" });
+    expect(entry().inTransaction).toBe(true);
+    expect(useTransactions.getState().open[consoleId]).toMatchObject({ statements: 1, failed: false });
   });
 });

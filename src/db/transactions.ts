@@ -156,11 +156,21 @@ const engineOf = (entry: ConsoleState): Engine | undefined =>
 
 /* Running transaction control. */
 
-/** Runs BEGIN/COMMIT/ROLLBACK on a session outside the result tabs. */
-async function runControl(sessionId: SessionId, sql: string): Promise<{ inTransaction: boolean; error?: string }> {
+/**
+ * Runs BEGIN/COMMIT/ROLLBACK on a console's session outside the result tabs.
+ * The session closes its open result before running anything, so the
+ * console's results stop offering more rows first.
+ */
+async function runControl(
+  consoleId: string,
+  sessionId: SessionId,
+  sql: string,
+): Promise<{ inTransaction: boolean; error?: string }> {
+  useConsoles.getState().releaseOpenResults(consoleId);
   let outcome: { inTransaction: boolean; error?: string } = { inTransaction: false, error: "No answer from the database." };
   try {
-    await api.execute(sessionId, sql, (event) => {
+    // Transaction control returns no rows: nothing to page.
+    await api.execute(sessionId, sql, null, (event) => {
       if (event.kind === "done") outcome = { inTransaction: event.inTransaction };
       else if (event.kind === "error") outcome = { inTransaction: event.inTransaction, error: event.message };
     });
@@ -185,7 +195,7 @@ export async function beginIfManual(
   if (!entry || !needsBegin(modeOf(consoleId), entry.inTransaction ?? false, sql, tableLoad)) return undefined;
   const engine = engineOf(entry);
   if (!engine) return undefined;
-  const outcome = await runControl(sessionId, beginSql(engine));
+  const outcome = await runControl(consoleId, sessionId, beginSql(engine));
   useConsoles.getState().setInTransaction(consoleId, outcome.inTransaction);
   if (outcome.error !== undefined) return `Could not open a transaction (manual mode): ${outcome.error}`;
   if (!outcome.inTransaction) return "Could not open a transaction (manual mode): the session still commits each statement.";
@@ -213,7 +223,7 @@ export async function endTransaction(consoleId: string, kind: "commit" | "rollba
   try {
     // Only reachable from the close guards: the buttons are disabled while a statement runs.
     if (isRunning(entry)) await useConsoles.getState().cancel(consoleId);
-    const outcome = await runControl(entry.sessionId, kind);
+    const outcome = await runControl(consoleId, entry.sessionId, kind);
     useConsoles.getState().setInTransaction(consoleId, outcome.inTransaction);
     if (outcome.error !== undefined) {
       setNotice(consoleId, `${kind === "commit" ? "Commit" : "Rollback"} failed: ${outcome.error}`);

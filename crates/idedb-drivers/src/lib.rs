@@ -7,7 +7,7 @@
 
 mod open;
 
-pub use open::{OpenError, open_data_source, resolve_password};
+pub use open::{OpenError, open_data_source, resolve_data_source, resolve_password};
 
 use idedb_core::{
     ApplyOutcome, Canceller, ConnectOptions, ConnectionParams, Engine, Fetch, QueryEvent, Result, RowChange,

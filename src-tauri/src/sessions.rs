@@ -15,7 +15,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use idedb_core::{Fetch, QueryEvent, RowChange, SchemaInfo, SchemaModel, ServerInfo, SqlProblem, TableRef};
+use idedb_core::{
+    ConnectOptions, Fetch, QueryEvent, RowChange, SchemaInfo, SchemaModel, ServerInfo, SqlProblem, TableRef,
+};
 use idedb_drivers::{AnyCanceller, AnySession, open_data_source};
 use idedb_store::{HistoryEntry, NewHistoryEntry, Store};
 use serde::Serialize;
@@ -121,7 +123,8 @@ pub async fn session_open(
     secrets: State<'_, Secrets>,
     sessions: State<'_, Sessions>,
 ) -> CommandResult<OpenedSession> {
-    let (_, session) = open_data_source(&store, secrets.0.as_ref(), &data_source_id, password).await?;
+    let (_, session) =
+        open_data_source(&store, secrets.0.as_ref(), &data_source_id, password, ConnectOptions::default()).await?;
 
     let id = sessions.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let server = session.server_info().clone();

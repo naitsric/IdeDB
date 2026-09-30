@@ -22,6 +22,7 @@ use idedb_core::{
     Pager, QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, TableRef,
     Value,
 };
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::limits::Limit;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, InterruptHandle, OpenFlags, Rows};
@@ -540,17 +541,36 @@ fn value(v: ValueRef<'_>) -> Value {
 /// write to it: read only, and without `SQLITE_OPEN_CREATE`, so a missing
 /// file is an error rather than a new empty database. No other file can be
 /// attached, read-write or created: the limit of attached databases is zero,
-/// which also stops `VACUUM INTO`, as it attaches its target. Only the
-/// session's own `temp` database stays writable.
+/// which also stops `VACUUM INTO`, as it attaches its target. Pragmas that
+/// change the whole process are denied (see [`deny_process_pragmas`]). Only
+/// the session's own `temp` database stays writable.
 ///
-/// A database in WAL mode needs its `-wal` and `-shm` files even to be read,
-/// and SQLite creates them next to it when they are missing: opening one
-/// read only fails when they are missing and cannot be created (in a
-/// read-only directory, say).
+/// A database in WAL mode needs its `-wal` and `-shm` files even to be read.
+/// Opening one read only creates them next to it when they are missing, and
+/// leaves them there on closing: only a read-write connection can checkpoint
+/// and remove them. It fails when they are missing and cannot be created (in
+/// a read-only directory, say).
 fn open_read_only(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    conn.authorizer(Some(deny_process_pragmas))?;
     Ok(conn)
+}
+
+/// Pragmas that set something for every connection in the process, not
+/// just this one: where SQLite writes temporary files, and (on Windows)
+/// where it resolves relative paths.
+const PROCESS_PRAGMAS: [&str; 2] = ["temp_store_directory", "data_store_directory"];
+
+/// Authorizer of read-only sessions: denies [`PROCESS_PRAGMAS`], reading
+/// them included, and allows everything else.
+fn deny_process_pragmas(context: AuthContext<'_>) -> Authorization {
+    match context.action {
+        AuthAction::Pragma { pragma_name, .. } if PROCESS_PRAGMAS.iter().any(|p| pragma_name.eq_ignore_ascii_case(p)) => {
+            Authorization::Deny
+        }
+        _ => Authorization::Allow,
+    }
 }
 
 /// Quotes an identifier for interpolation into SQL.

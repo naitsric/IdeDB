@@ -548,12 +548,14 @@ pub async fn open_results_respect_user_transactions(session: &mut impl Session, 
 }
 
 /// A read-only session ([`ConnectOptions::read_only`](crate::ConnectOptions::read_only))
-/// refuses `write_sql` with an `Error`, on its own and inside a transaction
-/// the user opened, and stays usable: `read_sql` (a query over what the
-/// write would change) runs before and after, with the same rows.
-/// `write_sql` must write to a table that exists and is not temporary: read
-/// only still lets some engines write to the session's own temporary tables.
-pub async fn read_only_refuses_writes<S: Session>(session: &mut S, write_sql: &str, read_sql: &str) {
+/// refuses `write_sql` with the engine's own read-only error, whose message
+/// contains `refusal`, on its own and inside a transaction the user opened.
+/// Any other error (a missing permission, a busy lock) fails the check. The
+/// session stays usable: `read_sql` (a query over what the write would
+/// change) runs before and after, with the same rows. `write_sql` must write
+/// to a table that exists and is not temporary: read only still lets some
+/// engines write to the session's own temporary tables.
+pub async fn read_only_refuses_writes<S: Session>(session: &mut S, write_sql: &str, read_sql: &str, refusal: &str) {
     let read = async |session: &mut S| {
         let events = collect(session, read_sql, 100).await;
         assert!(matches!(events.last(), Some(QueryEvent::Done { .. })), "{read_sql}: {events:?}");
@@ -562,7 +564,10 @@ pub async fn read_only_refuses_writes<S: Session>(session: &mut S, write_sql: &s
     let write = async |session: &mut S| {
         let events = collect(session, write_sql, 100).await;
         match events.last() {
-            Some(QueryEvent::Error { in_transaction, .. }) => *in_transaction,
+            Some(QueryEvent::Error { message, in_transaction, .. }) => {
+                assert!(message.contains(refusal), "{write_sql} failed, but not for being read only: {message}");
+                *in_transaction
+            }
             _ => panic!("a read-only session ran {write_sql}: {events:?}"),
         }
     };

@@ -579,9 +579,13 @@ async fn checks_and_sets_schema() {
     assert!(matches!(events.last(), Some(QueryEvent::Error { .. })), "{events:?}");
 }
 
+/// MySQL's refusal: `ERROR 1792 (25006): Cannot execute statement in a READ ONLY transaction.`
+const REFUSED: &str = "Cannot execute statement in a READ ONLY transaction";
+
 /// A read-only session, next to a read-write one that created `table` with
-/// one row for it to read. Not a temporary table: MySQL lets a read-only
-/// session write to its own.
+/// one row for it to read. A regular table: a temporary one would belong to
+/// the read-write session alone. (Read only, MySQL refuses `CREATE TEMPORARY
+/// TABLE`, but still lets a session write to temporary tables it already has.)
 async fn read_only_sessions(table: &str) -> Option<(MySqlSession, MySqlSession)> {
     let mut rw = session().await?;
     run_all(
@@ -600,10 +604,23 @@ async fn read_only_sessions(table: &str) -> Option<(MySqlSession, MySqlSession)>
 #[tokio::test]
 async fn read_only_refuses_writes() {
     let Some((mut rw, mut ro)) = read_only_sessions("idedb_read_only").await else { return };
-    testing::read_only_refuses_writes(&mut ro, "insert into idedb_read_only values (2)", "select id from idedb_read_only")
-        .await;
+    run_all(&mut rw, &["drop table if exists idedb_read_only_ddl"]).await;
+    testing::read_only_refuses_writes(
+        &mut ro,
+        "insert into idedb_read_only values (2)",
+        "select id from idedb_read_only",
+        REFUSED,
+    )
+    .await;
+    testing::read_only_refuses_writes(
+        &mut ro,
+        "create table idedb_read_only_ddl (id int)",
+        "select count(*) from information_schema.tables where table_name = 'idedb_read_only_ddl'",
+        REFUSED,
+    )
+    .await;
     // Cancelling still works: the connection that sends `KILL QUERY` is
-    // read only too.
+    // made without the read-only setup.
     testing::cancels_a_running_statement(ro, "select sleep(30)").await;
     run_all(&mut rw, &["drop table idedb_read_only"]).await;
 }
@@ -619,6 +636,7 @@ async fn read_only_survives_reconnecting() {
         &mut ro,
         "insert into idedb_read_only_reconnect values (2)",
         "select id from idedb_read_only_reconnect",
+        REFUSED,
     )
     .await;
     run_all(&mut rw, &["drop table idedb_read_only_reconnect"]).await;

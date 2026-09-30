@@ -62,17 +62,46 @@ impl ConnectionParams {
 /// connect. The default is what `connect` does.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConnectOptions {
-    /// The engine itself refuses writes, whatever the SQL: Postgres and
-    /// MySQL make every transaction of the session read only (reconnecting
-    /// restores it), SQLite opens the file read only and cannot attach
-    /// others. Only SQLite still lets the session create and write
-    /// temporary tables, which live outside the file.
+    /// Makes read only the session's default, which the engine then enforces
+    /// on statements that leave that default alone.
+    /// - Postgres and MySQL start every transaction of the session read only.
+    ///   Connecting and reconnecting fail if the server does not report the
+    ///   setting as applied.
+    /// - SQLite opens the file read only and cannot attach other files. It
+    ///   still lets the session create and write temporary tables, which
+    ///   live outside the file.
     ///
-    /// In Postgres and MySQL a statement can lift it (`SET SESSION
-    /// CHARACTERISTICS AS TRANSACTION READ WRITE` or `BEGIN READ WRITE`;
-    /// `SET SESSION TRANSACTION READ WRITE` or `START TRANSACTION READ
-    /// WRITE`), so whoever runs untrusted SQL on such a session must also
-    /// refuse those. Only a read-only database user closes that for good.
+    /// It is a default, not a sandbox. In Postgres and MySQL a single
+    /// statement can lift it for the rest of the session:
+    /// - Postgres: `SET default_transaction_read_only = off`, or
+    ///   `set_config('default_transaction_read_only', 'off', false)`. The
+    ///   latter works even in a read, and sticks because the driver's own
+    ///   read transaction commits. Also `RESET ALL`, `DISCARD ALL`, `SET
+    ///   SESSION CHARACTERISTICS AS TRANSACTION READ WRITE`, `BEGIN READ
+    ///   WRITE`, `SET TRANSACTION READ WRITE` after `BEGIN`, and any of these
+    ///   in a `DO` block.
+    /// - MySQL: `SET SESSION transaction_read_only = 0`, `SET
+    ///   @@transaction_read_only = 0`, `SET TRANSACTION READ WRITE`, `START
+    ///   TRANSACTION READ WRITE`. And one `execute` call runs every statement
+    ///   of a multi-statement text: in `SET ...; DELETE ...` both run.
+    ///
+    /// Nor does it stop side effects the database user is allowed to cause
+    /// without writing a table:
+    /// - Postgres: `COPY ... TO PROGRAM` or to a file, `ALTER SYSTEM` with
+    ///   `pg_reload_conf()`, `lo_export`, `pg_terminate_backend`, `dblink`
+    ///   and foreign data wrappers.
+    /// - MySQL: `SELECT ... INTO OUTFILE`, `SET GLOBAL` or `SET PERSIST`,
+    ///   `KILL`.
+    ///
+    /// Whoever runs untrusted SQL on such a session must also classify every
+    /// statement, guard every call, and connect as a database user that can
+    /// only read.
+    ///
+    /// In Postgres the setting belongs to the server backend, not to the
+    /// client. Behind a transaction-pooling pooler (pgbouncer, Supavisor) it
+    /// does not follow the client to the backend that runs its next
+    /// transaction. It can even stay behind and make other clients'
+    /// transactions read only.
     pub read_only: bool,
 }
 

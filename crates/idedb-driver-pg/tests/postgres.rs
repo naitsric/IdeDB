@@ -566,6 +566,9 @@ async fn applies_values_of_any_type() {
 
 const READ_ONLY: ConnectOptions = ConnectOptions { read_only: true };
 
+/// Postgres' refusal (SQLSTATE 25006): `cannot execute INSERT in a read-only transaction`.
+const REFUSED: &str = "in a read-only transaction";
+
 /// A read-only session, next to a read-write one that created `table` with
 /// one row for it to read.
 async fn read_only_sessions(table: &str) -> Option<(PgSession, PgSession)> {
@@ -586,8 +589,21 @@ async fn read_only_sessions(table: &str) -> Option<(PgSession, PgSession)> {
 #[tokio::test]
 async fn read_only_refuses_writes() {
     let Some((mut rw, mut ro)) = read_only_sessions("idedb_read_only").await else { return };
-    testing::read_only_refuses_writes(&mut ro, "insert into idedb_read_only values (2)", "select id from idedb_read_only")
-        .await;
+    run_all(&mut rw, &["drop table if exists idedb_read_only_ddl"]).await;
+    testing::read_only_refuses_writes(
+        &mut ro,
+        "insert into idedb_read_only values (2)",
+        "select id from idedb_read_only",
+        REFUSED,
+    )
+    .await;
+    testing::read_only_refuses_writes(
+        &mut ro,
+        "create table idedb_read_only_ddl (id int)",
+        "select count(*) from information_schema.tables where table_name = 'idedb_read_only_ddl'",
+        REFUSED,
+    )
+    .await;
     // The driver's own read transactions still work: a paged read, a paused one.
     testing::fetches_on_demand(&mut ro, "select g from generate_series(1, 23) g", 23).await;
     run_all(&mut rw, &["drop table idedb_read_only"]).await;
@@ -604,6 +620,7 @@ async fn read_only_survives_reconnecting() {
         &mut ro,
         "insert into idedb_read_only_reconnect values (2)",
         "select id from idedb_read_only_reconnect",
+        REFUSED,
     )
     .await;
     run_all(&mut rw, &["drop table idedb_read_only_reconnect"]).await;

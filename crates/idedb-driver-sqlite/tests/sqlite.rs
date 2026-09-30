@@ -375,6 +375,9 @@ async fn checks_report_problems_where_sqlite_locates_them() {
 
 const READ_ONLY: ConnectOptions = ConnectOptions { read_only: true };
 
+/// SQLite's refusal (`SQLITE_READONLY`).
+const REFUSED: &str = "attempt to write a readonly database";
+
 /// A read-only session on a file a read-write one set up with `statements`.
 async fn read_only_session(statements: &[&str]) -> (TempDir, SqliteSession) {
     let (dir, mut rw) = session().await;
@@ -382,9 +385,14 @@ async fn read_only_session(statements: &[&str]) -> (TempDir, SqliteSession) {
         run(&mut rw, sql).await;
     }
     drop(rw);
-    let path = dir.path().join("test.db");
-    let ro = SqliteSession::connect_with(&params(path.to_str().unwrap()), None, READ_ONLY).await.expect("connect");
+    let ro = read_only_on(&dir).await;
     (dir, ro)
+}
+
+/// A read-only session on `test.db` in `dir`.
+async fn read_only_on(dir: &TempDir) -> SqliteSession {
+    let path = dir.path().join("test.db");
+    SqliteSession::connect_with(&params(path.to_str().unwrap()), None, READ_ONLY).await.expect("connect")
 }
 
 /// The names of the files in `dir`, sorted.
@@ -404,11 +412,20 @@ async fn read_only_refuses_writes() {
         "insert into idedb_read_only values (1)",
     ])
     .await;
-    testing::read_only_refuses_writes(&mut s, "insert into idedb_read_only values (2)", "select id from idedb_read_only")
-        .await;
-    // Nor can it change the schema.
-    let events = collect(&mut s, "create table idedb_other (id int)", 10).await;
-    assert!(matches!(events.last(), Some(QueryEvent::Error { .. })), "{events:?}");
+    testing::read_only_refuses_writes(
+        &mut s,
+        "insert into idedb_read_only values (2)",
+        "select id from idedb_read_only",
+        REFUSED,
+    )
+    .await;
+    testing::read_only_refuses_writes(
+        &mut s,
+        "create table idedb_read_only_ddl (id int)",
+        "select count(*) from sqlite_schema where name = 'idedb_read_only_ddl'",
+        REFUSED,
+    )
+    .await;
 }
 
 /// Read only, a missing file is an error rather than a new database.
@@ -461,14 +478,50 @@ async fn read_only_cannot_attach_or_create_files() {
     testing::assert_usable(&mut s).await;
 }
 
+/// Pragmas that change every connection in the process are denied, reading
+/// them too; the others work.
+#[tokio::test]
+async fn read_only_denies_process_wide_pragmas() {
+    let (_dir, mut s) = read_only_session(&["create table t (id int)"]).await;
+    // A harmless value, should the pragma ever get through.
+    let temp = std::env::temp_dir();
+    for sql in [
+        format!("pragma temp_store_directory = '{}'", temp.display()),
+        format!("PRAGMA main.TEMP_STORE_DIRECTORY = '{}'", temp.display()),
+        "pragma temp_store_directory".to_owned(),
+        format!("pragma data_store_directory = '{}'", temp.display()),
+    ] {
+        let events = collect(&mut s, &sql, 10).await;
+        assert!(
+            matches!(events.last(), Some(QueryEvent::Error { message, .. }) if message.contains("not authorized")),
+            "{sql}: {events:?}"
+        );
+    }
+    let columns = collect(&mut s, "pragma table_info(t)", 10).await;
+    assert_eq!(rows(&columns).len(), 1, "{columns:?}");
+    testing::assert_usable(&mut s).await;
+}
+
 /// A database in WAL mode, the usual choice of apps that share their file,
-/// opens read only too.
+/// opens read only too. Reading it needs its `-wal` and `-shm` files: the
+/// read-only session creates them next to it when they are missing, and
+/// leaves them behind, since only a read-write connection removes them.
 #[tokio::test]
 async fn read_only_reads_a_wal_database() {
-    let (_dir, mut s) =
-        read_only_session(&["pragma journal_mode = wal", "create table t (id int)", "insert into t values (1)"]).await;
-    testing::read_only_refuses_writes(&mut s, "insert into t values (2)", "select id from t").await;
+    let (dir, mut rw) = session().await;
+    for sql in ["pragma journal_mode = wal", "create table t (id int)", "insert into t values (1)"] {
+        run(&mut rw, sql).await;
+    }
+    drop(rw);
+    assert_eq!(files(&dir), ["test.db"], "the last read-write connection to close removes them");
+
+    let wal = ["test.db", "test.db-shm", "test.db-wal"];
+    let mut s = read_only_on(&dir).await;
+    assert_eq!(files(&dir), wal, "opening read only creates them");
+    testing::read_only_refuses_writes(&mut s, "insert into t values (2)", "select id from t", REFUSED).await;
     assert_eq!(rows(&collect(&mut s, "select id from t", 10).await), vec![vec![Value::Int(1)]]);
+    drop(s);
+    assert_eq!(files(&dir), wal, "closing a read-only session leaves them");
 }
 
 /// Without options a session is read-write, as `connect` makes it.

@@ -84,8 +84,9 @@ commands may share a key when they declare different contexts (for example
 
 **Drivers.** Every driver implements `idedb_core::Session` and runs the shared
 conformance checks in `idedb_core::testing`: paging, cancellation, errors,
-data editor changes, checking without running, and respecting transactions
-the user opened. All engines behave the same behind the UI; a new engine
+data editor changes, checking without running, respecting transactions the
+user opened, and refusing writes in read-only sessions (`connect_with` and
+`ConnectOptions`). All engines behave the same behind the UI; a new engine
 starts by passing those checks.
 
 **Results.** A statement reads its first page (500 rows by default; *Result

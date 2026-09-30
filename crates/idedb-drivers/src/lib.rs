@@ -10,8 +10,8 @@ mod open;
 pub use open::{OpenError, open_data_source, resolve_password};
 
 use idedb_core::{
-    ApplyOutcome, Canceller, ConnectionParams, Engine, Fetch, QueryEvent, Result, RowChange, SchemaInfo,
-    SchemaModel, ServerInfo, Session, SqlProblem, TableRef,
+    ApplyOutcome, Canceller, ConnectOptions, ConnectionParams, Engine, Fetch, QueryEvent, Result, RowChange,
+    SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, TableRef,
 };
 use idedb_driver_mysql::{MySqlCanceller, MySqlSession};
 use idedb_driver_pg::{PgCanceller, PgSession};
@@ -42,10 +42,16 @@ macro_rules! dispatch {
 
 impl AnySession {
     pub async fn connect(params: &ConnectionParams, password: Option<&str>) -> Result<Self> {
+        Self::connect_with(params, password, ConnectOptions::default()).await
+    }
+
+    /// Like [`connect`](Self::connect), set up as `options` asks (see
+    /// [`ConnectOptions`]).
+    pub async fn connect_with(params: &ConnectionParams, password: Option<&str>, options: ConnectOptions) -> Result<Self> {
         Ok(match params.engine {
-            Engine::Postgres => Self::Postgres(Box::new(PgSession::connect(params, password).await?)),
-            Engine::Mysql => Self::Mysql(MySqlSession::connect(params, password).await?),
-            Engine::Sqlite => Self::Sqlite(SqliteSession::connect(params, password).await?),
+            Engine::Postgres => Self::Postgres(Box::new(PgSession::connect_with(params, password, options).await?)),
+            Engine::Mysql => Self::Mysql(MySqlSession::connect_with(params, password, options).await?),
+            Engine::Sqlite => Self::Sqlite(SqliteSession::connect_with(params, password, options).await?),
         })
     }
 
@@ -101,5 +107,46 @@ impl AnyCanceller {
             Self::Mysql(c) => c.cancel().await,
             Self::Sqlite(c) => c.cancel().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use idedb_core::{ConnectOptions, ConnectionParams, Engine, Fetch, QueryEvent, SslMode};
+
+    use super::AnySession;
+
+    fn sqlite(path: &std::path::Path) -> ConnectionParams {
+        ConnectionParams {
+            engine: Engine::Sqlite,
+            host: String::new(),
+            port: None,
+            user: String::new(),
+            database: String::new(),
+            ssl_mode: SslMode::Disable,
+            path: path.to_str().unwrap().to_owned(),
+        }
+    }
+
+    async fn last_event(session: &mut AnySession, sql: &str) -> Option<QueryEvent> {
+        let mut last = None;
+        session.execute(sql, Fetch::all(10), &mut |e| last = Some(e)).await;
+        last
+    }
+
+    /// The options reach the driver: read only, the session refuses writes.
+    #[tokio::test]
+    async fn connects_with_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let params = sqlite(&dir.path().join("test.db"));
+        let mut rw = AnySession::connect_with(&params, None, ConnectOptions::default()).await.unwrap();
+        assert!(matches!(last_event(&mut rw, "create table t (id int)").await, Some(QueryEvent::Done { .. })));
+
+        let mut ro = AnySession::connect_with(&params, None, ConnectOptions { read_only: true }).await.unwrap();
+        let refused = last_event(&mut ro, "insert into t values (1)").await;
+        assert!(
+            matches!(&refused, Some(QueryEvent::Error { message, .. }) if message.contains("readonly database")),
+            "{refused:?}"
+        );
     }
 }

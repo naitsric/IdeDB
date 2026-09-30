@@ -6,8 +6,9 @@ edition.workspace = true
 
 [dependencies]
 idedb-core.workspace = true
-# column_decltype: declared column types for result sets; hooks: progress handler for cancellation.
-rusqlite = { workspace = true, features = ["column_decltype", "hooks"] }
+# column_decltype: declared column types for result sets; hooks: progress handler for cancellation;
+# limits: no attached databases in read-only sessions.
+rusqlite = { workspace = true, features = ["column_decltype", "hooks", "limits"] }
 tokio.workspace = true
 
 [dev-dependencies]

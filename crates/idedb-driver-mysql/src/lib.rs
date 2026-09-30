@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use idedb_core::{
-    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged, Pager,
-    QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
+    ApplyOutcome, Canceller, Column, ConnectOptions, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged,
+    Pager, QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
     TableRef,
 };
 use mysql_async::consts::StatusFlags;
@@ -49,10 +49,19 @@ const UNSUPPORTED_PS: u16 = 1295;
 /// `KILL QUERY` instead: cheaper than a second connection when little is
 /// left, bounded when a lot is.
 const DRAIN_BUDGET: usize = 10_000;
+/// Makes every transaction the session runs read only by default, for
+/// [`ConnectOptions::read_only`]. A setup command of the session's
+/// connection options, so the connections that replace it on reconnect get
+/// it too, and so does the same connection after `Conn::reset` or
+/// `Conn::change_user` (init commands only run on new connections). The
+/// short-lived connections that send `KILL QUERY` leave it out.
+const READ_ONLY: &str = "SET SESSION TRANSACTION READ ONLY";
 
 pub struct MySqlSession {
     conn: Conn,
     opts: Opts,
+    /// How the session was set up, checked again on reconnect.
+    options: ConnectOptions,
     server: ServerInfo,
     /// Current database, as the server reported it after the last statement
     /// (so a `USE` typed in a console counts). Restored when a broken
@@ -164,6 +173,15 @@ impl CancelState {
 
 impl MySqlSession {
     pub async fn connect(params: &ConnectionParams, password: Option<&str>) -> Result<Self> {
+        Self::connect_with(params, password, ConnectOptions::default()).await
+    }
+
+    /// Like [`connect`](Self::connect), set up as `options` asks.
+    pub async fn connect_with(
+        params: &ConnectionParams,
+        password: Option<&str>,
+        options: ConnectOptions,
+    ) -> Result<Self> {
         let base = OptsBuilder::default()
             .ip_or_hostname(if params.host.is_empty() {
                 "localhost"
@@ -176,7 +194,8 @@ impl MySqlSession {
             .db_name((!params.database.is_empty()).then_some(params.database.as_str()))
             // Asking a local server for its unix socket would find the
             // container's path, not one on this host.
-            .prefer_socket(false);
+            .prefer_socket(false)
+            .setup(if options.read_only { vec![READ_ONLY] } else { vec![] });
 
         // libpq semantics: prefer/require encrypt without verifying.
         let unverified = SslOpts::default()
@@ -197,7 +216,9 @@ impl MySqlSession {
 
         let mut session = Self {
             cancel: Arc::new(CancelState {
-                opts: opts.clone(),
+                // A kill needs no read-only mode: one round trip less, and it
+                // still works if the server refused to set it.
+                opts: OptsBuilder::from_opts(opts.clone()).setup(Vec::<String>::new()).into(),
                 connection_id: AtomicU32::new(conn.id()),
                 requested: AtomicBool::new(false),
                 guard: Mutex::new(Guard::default()),
@@ -205,6 +226,7 @@ impl MySqlSession {
             }),
             conn,
             opts,
+            options,
             server: ServerInfo {
                 engine: Engine::Mysql,
                 version: String::new(),
@@ -224,6 +246,9 @@ impl MySqlSession {
         session.server.version = version;
         session.server.default_schema = database.clone();
         session.database = database;
+        if options.read_only {
+            check_read_only(&mut session.conn).await.map_err(Error::Connect)?;
+        }
         Ok(session)
     }
 
@@ -251,10 +276,18 @@ impl MySqlSession {
         Ok(open)
     }
 
-    /// Replaces a connection that failed fatally, keeping the selected database.
-    async fn reconnect(&mut self) -> Result<(), mysql_async::Error> {
+    /// Replaces a connection that failed fatally, keeping the selected
+    /// database. Read-only mode comes back with the options' setup command;
+    /// a connection on which it did not take is never used.
+    async fn reconnect(&mut self) -> Result<(), String> {
         let opts = OptsBuilder::from_opts(self.opts.clone()).db_name(self.database.clone());
-        let conn = Conn::new(opts).await?;
+        let mut conn = Conn::new(opts).await.map_err(|e| format_error(&e))?;
+        if self.options.read_only
+            && let Err(message) = check_read_only(&mut conn).await
+        {
+            let _ = conn.disconnect().await;
+            return Err(message);
+        }
         self.cancel.connection_id.store(conn.id(), Ordering::SeqCst);
         self.conn = conn;
         self.broken = false;
@@ -270,7 +303,7 @@ impl MySqlSession {
         let lost_transaction = self.in_transaction;
         match self.reconnect().await {
             Ok(()) => reconnected_notice(lost_transaction, self.database.as_deref()),
-            Err(e) => format!("The connection to the server was lost and reconnecting failed: {}", format_error(&e)),
+            Err(e) => format!("The connection to the server was lost and reconnecting failed: {e}"),
         }
     }
 
@@ -635,9 +668,7 @@ impl MySqlSession {
 
     async fn ensure_connected(&mut self) -> Result<()> {
         if self.broken {
-            self.reconnect()
-                .await
-                .map_err(|e| Error::Connect(format_error(&e)))?;
+            self.reconnect().await.map_err(Error::Connect)?;
         }
         Ok(())
     }
@@ -680,6 +711,20 @@ impl From<OpenError> for Error {
         match e {
             OpenError::Server(message) | OpenError::Transport(message) => Error::Connect(message),
         }
+    }
+}
+
+/// Asks the server whether [`READ_ONLY`] took, so a connection that did not
+/// apply it never passes for a read-only one.
+async fn check_read_only(conn: &mut Conn) -> Result<(), String> {
+    let value: Option<i64> =
+        conn.query_first("select @@transaction_read_only").await.map_err(|e| format_error(&e))?;
+    match value {
+        Some(1) => Ok(()),
+        other => Err(format!(
+            "The server did not make the session read only (transaction_read_only is {}).",
+            other.map_or_else(|| "not reported".to_owned(), |v| v.to_string())
+        )),
     }
 }
 

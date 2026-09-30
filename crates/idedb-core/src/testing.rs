@@ -547,6 +547,53 @@ pub async fn open_results_respect_user_transactions(session: &mut impl Session, 
     assert_usable(session).await;
 }
 
+/// A read-only session ([`ConnectOptions::read_only`](crate::ConnectOptions::read_only))
+/// refuses `write_sql` with the engine's own read-only error, whose message
+/// contains `refusal`, on its own and inside a transaction the user opened.
+/// Any other error (a missing permission, a busy lock) fails the check. The
+/// session stays usable: `read_sql` (a query over what the write would
+/// change) runs before and after, with the same rows. `write_sql` must write
+/// to a table that exists and is not temporary: read only still lets some
+/// engines write to the session's own temporary tables.
+pub async fn read_only_refuses_writes<S: Session>(session: &mut S, write_sql: &str, read_sql: &str, refusal: &str) {
+    let read = async |session: &mut S| {
+        let events = collect(session, read_sql, 100).await;
+        assert!(matches!(events.last(), Some(QueryEvent::Done { .. })), "{read_sql}: {events:?}");
+        rows(&events)
+    };
+    let write = async |session: &mut S| {
+        let events = collect(session, write_sql, 100).await;
+        match events.last() {
+            Some(QueryEvent::Error { message, in_transaction, .. }) => {
+                assert!(message.contains(refusal), "{write_sql} failed, but not for being read only: {message}");
+                *in_transaction
+            }
+            _ => panic!("a read-only session ran {write_sql}: {events:?}"),
+        }
+    };
+    let before = read(session).await;
+
+    assert!(!write(session).await, "a refused write left a transaction open");
+    assert_eq!(read(session).await, before, "a refused write changed the data");
+
+    // A transaction the user opens is read only too.
+    let begun = collect(session, "begin", 10).await;
+    assert!(matches!(begun.last(), Some(QueryEvent::Done { in_transaction: true, .. })), "{begun:?}");
+    write(session).await;
+    // The engine may already have ended the transaction; either way none is
+    // left open.
+    let ended = collect(session, "rollback", 10).await;
+    assert!(
+        matches!(
+            ended.last(),
+            Some(QueryEvent::Done { in_transaction: false, .. } | QueryEvent::Error { in_transaction: false, .. })
+        ),
+        "{ended:?}"
+    );
+    assert_eq!(read(session).await, before, "a refused write inside a transaction changed the data");
+    assert_usable(session).await;
+}
+
 pub async fn assert_usable(session: &mut impl Session) {
     let events = collect(session, "select 1", 10).await;
     assert_eq!(rows(&events), vec![vec![Value::Int(1)]], "session unusable: {events:?}");

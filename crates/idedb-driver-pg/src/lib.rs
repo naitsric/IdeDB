@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::{TryStreamExt, pin_mut};
 use idedb_core::{
-    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged, Pager,
-    QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
+    ApplyOutcome, Canceller, Column, ConnectOptions, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged,
+    Pager, QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
     TableRef,
 };
 use postgres_native_tls::MakeTlsConnector;
@@ -48,6 +48,8 @@ pub struct PgSession {
     client: Client,
     /// How to connect again when the connection is lost.
     config: Config,
+    /// How the session was set up, restored on reconnect.
+    options: ConnectOptions,
     cancel: Arc<CancelState>,
     server: ServerInfo,
     connection: JoinHandle<()>,
@@ -62,6 +64,19 @@ pub struct PgSession {
 /// Name of the cursor (and, inside the user's block, the savepoint) that
 /// holds a paused read.
 const CURSOR: &str = "idedb_result";
+
+/// Makes every transaction the session runs read only by default, for
+/// [`ConnectOptions::read_only`]: the driver's own read transactions and
+/// the user's blocks alike. Set on the open session rather than through the
+/// startup packet's `options`, which pgbouncer rejects.
+///
+/// A session setting belongs to the server backend, not to the client.
+/// Behind a transaction-pooling pooler (pgbouncer, Supavisor) it does not
+/// follow the client to the backend that runs its next transaction, and it
+/// stays behind on the backend it was set on, making other clients'
+/// transactions read only. The check that follows it (see
+/// [`make_read_only`]) notices only when that check lands elsewhere.
+const READ_ONLY: &str = "set session characteristics as transaction read only";
 
 /// A read paused at its fetch limit, on the [`CURSOR`].
 struct OpenResult {
@@ -164,6 +179,15 @@ struct Pumped {
 
 impl PgSession {
     pub async fn connect(params: &ConnectionParams, password: Option<&str>) -> Result<Self> {
+        Self::connect_with(params, password, ConnectOptions::default()).await
+    }
+
+    /// Like [`connect`](Self::connect), set up as `options` asks.
+    pub async fn connect_with(
+        params: &ConnectionParams,
+        password: Option<&str>,
+        options: ConnectOptions,
+    ) -> Result<Self> {
         let mut config = Config::new();
         config
             .host(if params.host.is_empty() { "localhost" } else { &params.host })
@@ -182,6 +206,9 @@ impl PgSession {
         }
         let tls = tls_connector(params.ssl_mode)?;
         let (client, connection) = open(&config, &tls).await.map_err(|e| Error::Connect(format_error(&e)))?;
+        if options.read_only {
+            make_read_only(&client).await.map_err(Error::Connect)?;
+        }
 
         let row = client
             .query_one("select current_setting('server_version'), current_schema()", &[])
@@ -199,14 +226,30 @@ impl PgSession {
             guard: Mutex::new(Guard::default()),
             request_done: Notify::new(),
         });
-        Ok(Self { client, config, cancel, server, connection, in_transaction: false, schema: None, open: None })
+        Ok(Self {
+            client,
+            config,
+            options,
+            cancel,
+            server,
+            connection,
+            in_transaction: false,
+            schema: None,
+            open: None,
+        })
     }
 
-    /// Replaces a lost connection, restoring the search path the console chose.
-    async fn reconnect(&mut self) -> Result<(), tokio_postgres::Error> {
-        let (client, connection) = open(&self.config, &self.cancel.tls).await?;
+    /// Replaces a lost connection, restoring read-only mode and the search
+    /// path the console chose. A connection that would not be read only is
+    /// never used.
+    async fn reconnect(&mut self) -> Result<(), String> {
+        let (client, connection) = open(&self.config, &self.cancel.tls).await.map_err(|e| format_error(&e))?;
+        if self.options.read_only {
+            make_read_only(&client).await?;
+        }
         if let Some(schema) = &self.schema {
-            client.batch_execute(&format!("set search_path to {}", search_path(schema))).await?;
+            let set = format!("set search_path to {}", search_path(schema));
+            client.batch_execute(&set).await.map_err(|e| format_error(&e))?;
         }
         *self.cancel.token.lock().unwrap() = client.cancel_token();
         self.connection.abort();
@@ -224,14 +267,14 @@ impl PgSession {
         let lost_transaction = self.in_transaction;
         match self.reconnect().await {
             Ok(()) => reconnected_notice(lost_transaction, self.schema.as_deref()),
-            Err(e) => format!("The connection to the server was lost and reconnecting failed: {}", format_error(&e)),
+            Err(e) => format!("The connection to the server was lost and reconnecting failed: {e}"),
         }
     }
 
     /// Reconnects quietly, for the explorer's reads (introspection, checks).
     async fn ensure_connected(&mut self) -> Result<()> {
         if self.client.is_closed() {
-            self.reconnect().await.map_err(|e| Error::Connect(format_error(&e)))?;
+            self.reconnect().await.map_err(Error::Connect)?;
         }
         Ok(())
     }
@@ -595,6 +638,25 @@ impl PgSession {
         let prepared = tx.prepare(sql).await.map(drop);
         tx.rollback().await?;
         prepared
+    }
+}
+
+/// Makes the session on `client` read only ([`READ_ONLY`]) and asks the
+/// server whether it took, so a connection that did not apply it never
+/// passes for a read-only one.
+async fn make_read_only(client: &Client) -> Result<(), String> {
+    client.batch_execute(READ_ONLY).await.map_err(|e| format_error(&e))?;
+    let shown = client.simple_query("show transaction_read_only").await.map_err(|e| format_error(&e))?;
+    let value = shown.iter().find_map(|m| match m {
+        SimpleQueryMessage::Row(row) => row.get(0),
+        _ => None,
+    });
+    match value {
+        Some("on") => Ok(()),
+        other => Err(format!(
+            "The server did not make the session read only (transaction_read_only is {}).",
+            other.unwrap_or("not reported")
+        )),
     }
 }
 

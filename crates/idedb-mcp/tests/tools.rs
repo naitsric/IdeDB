@@ -667,3 +667,143 @@ async fn progress_is_optional_and_counted() {
     assert_eq!(result.row_count, 3);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
+
+/// Leaves a journal next to the data source's file, as a writer that
+/// crashed mid-transaction does: SQLite must roll it back before reading
+/// anything, which a read-only session cannot, so it refuses even a SELECT
+/// as a write. A read-write session rolls it back (this one holds nothing).
+fn leave_a_hot_journal(env: &Env, source: &DataSource) {
+    std::fs::write(format!("{}-journal", source.params.path), b"x").unwrap();
+    assert!(env.dir.path().join("shop.db-journal").exists());
+}
+
+#[tokio::test]
+async fn a_read_the_engine_refuses_as_a_write_needs_approval() {
+    let env = Env::new();
+    let shop = env.source("shop").await;
+    let (caller, _) = env.test.client("claude", &[(&shop, Access::Write)]);
+    // The pooled read-only session is open before the journal appears.
+    env.query(&caller, "shop", "select 1").await.unwrap();
+    leave_a_hot_journal(&env, &shop);
+    let sql = "select count(*) from t";
+
+    // query refuses it, and says where to go.
+    let refused = tool_error(env.query(&caller, "shop", sql).await);
+    assert!(refused.starts_with("The database refused this statement because it writes"), "{refused}");
+    assert!(refused.contains("attempt to write a readonly database"), "{refused}");
+    assert!(refused.ends_with("Use the execute tool instead; the user must approve it."), "{refused}");
+    let audit = env.test.last_audit();
+    assert_eq!((audit.decision, audit.statement_kind.as_deref()), (Decision::Denied, Some("SELECT (engine refused as write)")));
+    assert!(audit.elapsed_ms.is_some());
+    assert_eq!(env.approvals_requested(), 0);
+
+    // execute takes it through approval, onto a read-write session.
+    let answered = env.answer_next(true);
+    let result = env.execute(&caller, "shop", sql).await.unwrap();
+    assert_eq!(result.rows, Some(vec![vec![json!(3)]]));
+    let request = answered.await.unwrap();
+    assert_eq!((request.summary.as_str(), request.write_kind), ("SELECT (engine refused as write)", WriteKind::Other));
+    let audit = env.test.last_audit();
+    assert_eq!((audit.decision, audit.statement_kind.as_deref()), (Decision::Approved, Some("SELECT (engine refused as write)")));
+    assert!(audit.approval_wait_ms.is_some());
+    assert_eq!(env.test.audit().len(), 3);
+    // The read-write session rolled the journal back, so reads work again.
+    assert!(!env.dir.path().join("shop.db-journal").exists());
+    assert_eq!(env.query(&caller, "shop", sql).await.unwrap().rows, [[json!(3)]]);
+}
+
+#[tokio::test]
+async fn a_read_the_engine_refuses_follows_the_rules_for_writes() {
+    let env = Env::new();
+    let shop = env.source("shop").await;
+    let (reader, _) = env.test.client("reader", &[(&shop, Access::Read)]);
+    let (writer, _) = env.test.client("writer", &[(&shop, Access::Write)]);
+    env.query(&reader, "shop", "select 1").await.unwrap();
+    env.query(&writer, "shop", "select 1").await.unwrap();
+    leave_a_hot_journal(&env, &shop);
+
+    let refused = tool_error(env.execute(&reader, "shop", "select * from t").await);
+    assert!(refused.starts_with("The database refused this statement as a write"), "{refused}");
+    assert!(refused.contains("This client may only read 'shop'"), "{refused}");
+    let audit = env.test.last_audit();
+    assert_eq!((audit.decision, audit.statement_kind.as_deref()), (Decision::Denied, Some("SELECT (engine refused as write)")));
+
+    env.test.store.mcp_set_never_write(&shop.id, true).unwrap();
+    let refused = tool_error(env.execute(&writer, "shop", "select * from t").await);
+    assert!(refused.contains("'shop' is marked never-write in IdeDB"), "{refused}");
+    assert_eq!(env.approvals_requested(), 0);
+}
+
+#[tokio::test]
+async fn approved_writes_have_a_timeout_of_their_own() {
+    let env = Env::new();
+    let shop = env.source("shop").await;
+    let (caller, _) = env.test.client("claude", &[(&shop, Access::Write)]);
+    env.settings(|s| {
+        s.statement_timeout_secs = 1;
+        s.write_timeout_secs = 2;
+    });
+
+    env.answer_next(true);
+    let endless = "insert into t (name) with recursive c(x) as (select 1 union all select x + 1 from c) select 'x' from c";
+    let refused = tool_error(env.execute(&caller, "shop", endless).await);
+    assert!(refused.starts_with("The statement was cancelled after 2s, IdeDB's write timeout."), "{refused}");
+    let audit = env.test.last_audit();
+    assert_eq!(audit.decision, Decision::Approved);
+    assert!(audit.elapsed_ms.is_some_and(|ms| ms >= 2000), "{:?}", audit.elapsed_ms);
+    // Stopped, and undone.
+    assert_eq!(names(&shop).await.len(), 3);
+}
+
+#[tokio::test]
+async fn revoking_or_deleting_a_client_withdraws_its_pending_writes() {
+    for delete in [false, true] {
+        let env = Env::new();
+        let shop = env.source("shop").await;
+        let (caller, _) = env.test.client("claude", &[(&shop, Access::Write)]);
+        let (other, _) = env.test.client("cursor", &[(&shop, Access::Write)]);
+
+        let mut events = env.test.subscribe();
+        let server = env.server.clone();
+        let (waiting, other_waiting) = {
+            let (server, caller, other) = (server.clone(), caller.clone(), other.clone());
+            (
+                tokio::spawn({
+                    let server = server.clone();
+                    async move { env_execute(&server, &caller, "delete from t").await }
+                }),
+                tokio::spawn(async move { env_execute(&server, &other, "delete from t").await }),
+            )
+        };
+        let mut requested = 0;
+        while requested < 2 {
+            if matches!(events.recv().await.unwrap(), McpEvent::ApprovalRequested(_)) {
+                requested += 1;
+            }
+        }
+
+        if delete {
+            env.test.store.mcp_client_delete(&caller.client_id).unwrap();
+        } else {
+            env.test.store.mcp_client_revoke(&caller.client_id).unwrap();
+        }
+        server.close_client(&caller.client_id).await;
+
+        let refused = tool_error(waiting.await.unwrap());
+        assert!(refused.starts_with("This client's access was revoked in IdeDB"), "{refused}");
+        let audit = env.test.last_audit();
+        assert_eq!((audit.decision, audit.client_id.as_deref()), (Decision::Withdrawn, Some(caller.client_id.as_str())));
+        assert!(audit.approval_wait_ms.is_some());
+        let resolved = env.test.events().into_iter().any(|e| {
+            matches!(e, McpEvent::ApprovalResolved { decision: Decision::Withdrawn, .. })
+        });
+        assert!(resolved);
+
+        // The other client's approval is still pending, and still answerable.
+        let pending = server.pending_approvals();
+        assert_eq!(pending.iter().map(|r| r.client_id.as_str()).collect::<Vec<_>>(), [other.client_id.as_str()]);
+        assert!(server.answer_approval(pending[0].id, false));
+        tool_error(other_waiting.await.unwrap());
+        assert_eq!(names(&shop).await.len(), 3);
+    }
+}

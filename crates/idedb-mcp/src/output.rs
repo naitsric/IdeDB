@@ -16,11 +16,14 @@ this client. IdeDB records every call in an audit log the user reviews.
 rows unless you pass maxRows (up to 1000), and refuses anything that writes.
 - execute runs one statement that changes data or schema. The user must approve each one in IdeDB, so pass `reason` \
 to say why; it may be rejected, and it waits a limited time (2 minutes by default) for an answer. It is refused \
-without asking where this client may only read, or on connections the user marked never-write.
+without asking where this client may only read, or on connections the user marked never-write. A read sent to execute \
+runs right away, unless the database refuses it for writing (a SELECT calling a function that changes data): then it \
+needs approval like any write.
 - One statement per call: no scripts of several statements separated by `;`, and no transaction control or session \
 settings (BEGIN, COMMIT, SET, USE...). Each call runs on its own.
-- Statements are cancelled after a timeout (30 seconds by default). Results are cut to a row limit and about 256 KB, \
-and flagged `truncated` when cut: prefer WHERE, LIMIT and aggregates to reading whole tables.
+- Reads are cancelled after a timeout (30 seconds by default), approved writes after a longer one (10 minutes by \
+default). Results are cut to a row limit and about 256 KB, and flagged `truncated` when cut: prefer WHERE, LIMIT and \
+aggregates to reading whole tables.
 - Values come back as JSON. Integers too large for a JSON number, NaN and infinities come back as strings; long text \
 is cut, and binary values are summarized.";
 

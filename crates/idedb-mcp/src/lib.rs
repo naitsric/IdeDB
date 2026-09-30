@@ -231,9 +231,14 @@ impl McpServer {
         self.0.pool.close(|(_, source)| source == data_source_id).await;
     }
 
-    /// Closes every pooled session of a client, cancelling what they run:
-    /// call it when the client is revoked or deleted.
+    /// Ends everything a client has going: its pending approvals are
+    /// withdrawn at once (each audited as `withdrawn`, with an
+    /// [`McpEvent::ApprovalResolved`]), and its pooled sessions close,
+    /// cancelling what they run. Call it right after revoking or deleting
+    /// the client in the store: its token already stopped authenticating,
+    /// and an approval registered in between is caught when it registers.
     pub async fn close_client(&self, client_id: &str) {
+        self.0.approvals.withdraw_client(client_id);
         self.0.pool.close(|(client, _)| client == client_id).await;
     }
 

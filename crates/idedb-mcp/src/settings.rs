@@ -12,6 +12,8 @@ pub const MAX_ROWS: u32 = 1000;
 
 /// Longest statement timeout and approval wait the settings accept.
 const MAX_SECS: u64 = 3600;
+/// Longest write timeout: approved schema changes on big tables take long.
+const MAX_WRITE_SECS: u64 = 24 * 3600;
 
 const KEY: &str = "mcp";
 
@@ -25,15 +27,24 @@ pub struct McpSettings {
     /// Rows a read returns unless the client asks for another number (up to
     /// [`MAX_ROWS`]), and rows an approved write returns (`RETURNING`).
     pub max_rows: u32,
-    /// Statements still running after this long are cancelled.
+    /// Reads still running after this long are cancelled.
     pub statement_timeout_secs: u64,
+    /// Approved writes still running after this long are cancelled.
+    pub write_timeout_secs: u64,
     /// A write nobody approves or rejects within this long is refused.
     pub approval_timeout_secs: u64,
 }
 
 impl Default for McpSettings {
     fn default() -> Self {
-        Self { enabled: false, port: 7412, max_rows: 200, statement_timeout_secs: 30, approval_timeout_secs: 120 }
+        Self {
+            enabled: false,
+            port: 7412,
+            max_rows: 200,
+            statement_timeout_secs: 30,
+            write_timeout_secs: 600,
+            approval_timeout_secs: 120,
+        }
     }
 }
 
@@ -49,6 +60,9 @@ impl McpSettings {
         if !(1..=MAX_SECS).contains(&self.statement_timeout_secs) {
             return Err(format!("the statement timeout must be between 1 and {MAX_SECS} seconds"));
         }
+        if !(1..=MAX_WRITE_SECS).contains(&self.write_timeout_secs) {
+            return Err(format!("the write timeout must be between 1 and {MAX_WRITE_SECS} seconds"));
+        }
         if !(1..=MAX_SECS).contains(&self.approval_timeout_secs) {
             return Err(format!("the approval timeout must be between 1 and {MAX_SECS} seconds"));
         }
@@ -57,6 +71,10 @@ impl McpSettings {
 
     pub fn statement_timeout(&self) -> Duration {
         Duration::from_secs(self.statement_timeout_secs)
+    }
+
+    pub fn write_timeout(&self) -> Duration {
+        Duration::from_secs(self.write_timeout_secs)
     }
 
     pub fn approval_timeout(&self) -> Duration {
@@ -68,6 +86,7 @@ impl McpSettings {
         Self {
             max_rows: self.max_rows.clamp(1, MAX_ROWS),
             statement_timeout_secs: self.statement_timeout_secs.clamp(1, MAX_SECS),
+            write_timeout_secs: self.write_timeout_secs.clamp(1, MAX_WRITE_SECS),
             approval_timeout_secs: self.approval_timeout_secs.clamp(1, MAX_SECS),
             ..self
         }
@@ -101,9 +120,13 @@ mod tests {
         store.set_setting(KEY, "not json").unwrap();
         assert_eq!(load(&store).unwrap(), McpSettings::default());
         // Out of range values read back in range.
-        store.set_setting(KEY, r#"{"maxRows":5000,"statementTimeoutSecs":0}"#).unwrap();
+        store.set_setting(KEY, r#"{"maxRows":5000,"statementTimeoutSecs":0,"writeTimeoutSecs":999999}"#).unwrap();
         let clamped = load(&store).unwrap();
         assert_eq!((clamped.max_rows, clamped.statement_timeout_secs), (MAX_ROWS, 1));
+        assert_eq!(clamped.write_timeout_secs, MAX_WRITE_SECS);
+        // Settings stored before the write timeout existed get its default.
+        store.set_setting(KEY, r#"{"statementTimeoutSecs":5}"#).unwrap();
+        assert_eq!(load(&store).unwrap().write_timeout(), Duration::from_secs(600));
     }
 
     #[test]
@@ -114,10 +137,16 @@ mod tests {
         assert_eq!(load(&store).unwrap(), settings);
         let json: serde_json::Value = serde_json::from_str(&store.setting(KEY).unwrap().unwrap()).unwrap();
         assert_eq!(json["statementTimeoutSecs"], 30);
+        assert_eq!(json["writeTimeoutSecs"], 600);
         assert_eq!(json["approvalTimeoutSecs"], 120);
 
-        let invalid = McpSettings { max_rows: 0, ..McpSettings::default() };
-        assert!(matches!(save(&store, &invalid), Err(Error::InvalidSettings(_))));
+        for invalid in [
+            McpSettings { max_rows: 0, ..McpSettings::default() },
+            McpSettings { write_timeout_secs: 0, ..McpSettings::default() },
+            McpSettings { write_timeout_secs: MAX_WRITE_SECS + 1, ..McpSettings::default() },
+        ] {
+            assert!(matches!(save(&store, &invalid), Err(Error::InvalidSettings(_))), "{invalid:?}");
+        }
         assert_eq!(load(&store).unwrap(), settings);
     }
 }

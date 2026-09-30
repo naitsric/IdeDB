@@ -96,6 +96,36 @@ impl TestHost {
         self.store.save(source).expect("save the data source")
     }
 
+    /// Saves a data source on the server the environment variable `var`
+    /// names (`scheme://user:password@host:port/database`, like the driver
+    /// tests' `IDEDB_PG_URL` and `IDEDB_MYSQL_URL`), with `database` in
+    /// place of the URL's when given, and its password saved. Returns it and
+    /// the password; None, saying the test skips, when `var` is not set.
+    pub fn save_server(&self, var: &str, engine: Engine, database: Option<&str>) -> Option<(DataSource, String)> {
+        let Ok(url) = std::env::var(var) else {
+            eprintln!("{var} not set, skipping");
+            return None;
+        };
+        let (_, rest) = url.split_once("://").expect("scheme");
+        let (auth, address) = rest.rsplit_once('@').expect("credentials");
+        let (user, password) = auth.split_once(':').expect("user:password");
+        let (host_port, url_database) = address.split_once('/').unwrap_or((address, ""));
+        let (host, port) = host_port.split_once(':').expect("host:port");
+        let params = ConnectionParams {
+            engine,
+            host: host.into(),
+            port: Some(port.parse().expect("port")),
+            user: user.into(),
+            database: database.unwrap_or(url_database).into(),
+            ssl_mode: SslMode::Disable,
+            path: String::new(),
+        };
+        let source =
+            self.save(DataSource { id: String::new(), name: var.into(), params, color: None, save_password: true });
+        self.secrets.set(&source.id, password).expect("save the password");
+        Some((source, password.into()))
+    }
+
     /// Registers a client with these grants; returns it as a caller over
     /// HTTP, and its token.
     pub fn client(&self, name: &str, grants: &[(&DataSource, Access)]) -> (Caller, String) {

@@ -1,5 +1,6 @@
 //! Writes waiting for the user: each one is announced to the UI, then waits
-//! for an answer, a timeout, or its caller to go away.
+//! for an answer, a timeout, its caller to go away, or its client to be
+//! revoked.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -32,7 +33,8 @@ pub struct ApprovalRequest {
     pub data_source_name: String,
     pub data_source_color: Option<String>,
     pub sql: String,
-    /// The statement type, e.g. `DELETE` or `CREATE TABLE`.
+    /// The statement type, e.g. `DELETE` or `CREATE TABLE`; for a read the
+    /// engine refused as a write, e.g. `SELECT (engine refused as write)`.
     pub summary: String,
     /// Named `writeKind` rather than `kind`, which tags [`McpEvent`].
     pub write_kind: WriteKind,
@@ -52,6 +54,29 @@ pub struct Progress {
     pub waited_secs: u64,
     pub timeout_secs: u64,
     pub message: String,
+}
+
+/// How a wait for approval ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answer {
+    Approved,
+    Rejected,
+    Timeout,
+    /// The call was cancelled.
+    Cancelled,
+    /// The client was revoked or deleted.
+    Revoked,
+}
+
+impl Answer {
+    pub fn decision(self) -> Decision {
+        match self {
+            Answer::Approved => Decision::Approved,
+            Answer::Rejected => Decision::Rejected,
+            Answer::Timeout => Decision::Timeout,
+            Answer::Cancelled | Answer::Revoked => Decision::Withdrawn,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -79,10 +104,25 @@ impl Approvals {
         self.pending.lock().unwrap().values().map(|p| p.request.clone()).collect()
     }
 
-    /// Announces `request` and waits for the user's answer, at most
-    /// `timeout`, reporting `progress` every 15 s. `cancel` withdraws it.
-    /// Whatever ends the wait (dropping this future too), the request stops
-    /// being pending and the UI hears how it ended.
+    /// Withdraws every pending approval of a client: each of their waits
+    /// ends as [`Answer::Revoked`]. Returns how many there were.
+    pub fn withdraw_client(&self, client_id: &str) -> usize {
+        let mut pending = self.pending.lock().unwrap();
+        let ids: Vec<u64> =
+            pending.iter().filter(|(_, p)| p.request.client_id == client_id).map(|(id, _)| *id).collect();
+        // Dropping an answer's sender wakes its wait.
+        ids.iter().filter_map(|id| pending.remove(id)).count()
+    }
+
+    /// Registers `request`, announces it, and waits for the user's answer,
+    /// at most `timeout`, reporting `progress` every 15 s. `cancel`
+    /// withdraws it, and so does [`withdraw_client`](Self::withdraw_client).
+    ///
+    /// `client_active` is asked once the request is registered, before it
+    /// is announced: a client revoked just before then would otherwise
+    /// escape `withdraw_client`. Whatever ends the wait (dropping this
+    /// future too), the request stops being pending and the UI hears how it
+    /// ended.
     pub async fn wait(
         &self,
         host: &dyn Host,
@@ -90,28 +130,33 @@ impl Approvals {
         timeout: Duration,
         cancel: &CancellationToken,
         progress: &(dyn Fn(Progress) + Send + Sync),
-    ) -> Decision {
+        client_active: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Answer {
         let id = request.id;
         let (answer, mut answered) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, Pending { request: request.clone(), answer });
         let mut waiting = Waiting { approvals: self, host, id, decision: Decision::Withdrawn };
+        if !client_active() {
+            return Answer::Revoked;
+        }
         host.notify(McpEvent::ApprovalRequested(request));
 
         let started = Instant::now();
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
         let mut ticks = tokio::time::interval_at(started + PROGRESS_EVERY, PROGRESS_EVERY);
-        waiting.decision = loop {
+        let answer = loop {
             tokio::select! {
                 // An answer that arrives with the deadline still counts.
                 biased;
                 answer = &mut answered => break match answer {
-                    Ok(true) => Decision::Approved,
-                    Ok(false) => Decision::Rejected,
-                    Err(_) => Decision::Withdrawn,
+                    Ok(true) => Answer::Approved,
+                    Ok(false) => Answer::Rejected,
+                    // Only `withdraw_client` drops the sender unanswered.
+                    Err(_) => Answer::Revoked,
                 },
-                () = &mut deadline => break Decision::Timeout,
-                () = cancel.cancelled() => break Decision::Withdrawn,
+                () = &mut deadline => break Answer::Timeout,
+                () = cancel.cancelled() => break Answer::Cancelled,
                 _ = ticks.tick() => {
                     let waited_secs = started.elapsed().as_secs();
                     progress(Progress {
@@ -125,7 +170,8 @@ impl Approvals {
                 }
             }
         };
-        waiting.decision
+        waiting.decision = answer.decision();
+        answer
     }
 }
 
@@ -141,5 +187,77 @@ impl Drop for Waiting<'_> {
     fn drop(&mut self) {
         self.approvals.pending.lock().unwrap().remove(&self.id);
         self.host.notify(McpEvent::ApprovalResolved { id: self.id, decision: self.decision });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::TestHost;
+
+    fn request(id: u64, client_id: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            id,
+            client_id: client_id.into(),
+            client_name: client_id.into(),
+            client_info: None,
+            data_source_id: "ds".into(),
+            data_source_name: "shop".into(),
+            data_source_color: None,
+            sql: "delete from t".into(),
+            summary: "DELETE".into(),
+            write_kind: WriteKind::Dml,
+            warnings: Vec::new(),
+            reason: None,
+            requested_at: String::new(),
+            expires_at: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_revoked_before_the_announcement_is_never_asked_about() {
+        let host = TestHost::new();
+        let approvals = Approvals::default();
+        let cancel = CancellationToken::new();
+        let wait = approvals.wait(&*host, request(1, "c1"), Duration::from_secs(60), &cancel, &|_| {}, &|| false);
+        assert_eq!(wait.await, Answer::Revoked);
+        assert!(approvals.pending().is_empty());
+        let events = host.events();
+        assert!(
+            matches!(events.as_slice(), [McpEvent::ApprovalResolved { id: 1, decision: Decision::Withdrawn }]),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn withdrawing_a_client_ends_only_its_waits() {
+        let host = TestHost::new();
+        let approvals = Approvals::default();
+        let cancel = CancellationToken::new();
+        let wait = |id, client| {
+            approvals.wait(&*host, request(id, client), Duration::from_secs(60), &cancel, &|_| {}, &|| true)
+        };
+        let (mut first, mut second, mut other) = (Box::pin(wait(1, "c1")), Box::pin(wait(2, "c1")), Box::pin(wait(3, "c2")));
+        // Registered and announced.
+        for waiting in [&mut first, &mut second, &mut other] {
+            assert!(futures_poll(waiting).is_none());
+        }
+        assert_eq!(approvals.pending().len(), 3);
+
+        assert_eq!(approvals.withdraw_client("c1"), 2);
+        assert_eq!((first.await, second.await), (Answer::Revoked, Answer::Revoked));
+        assert_eq!(approvals.pending().iter().map(|r| r.id).collect::<Vec<_>>(), [3]);
+        assert!(approvals.answer(3, false));
+        assert_eq!(other.await, Answer::Rejected);
+    }
+
+    /// Polls a future once.
+    fn futures_poll<F: std::future::Future + Unpin>(future: &mut F) -> Option<F::Output> {
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        match std::pin::Pin::new(future).poll(&mut context) {
+            std::task::Poll::Ready(output) => Some(output),
+            std::task::Poll::Pending => None,
+        }
     }
 }

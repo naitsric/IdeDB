@@ -21,10 +21,10 @@ use serde_json::Value as Json;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::approvals::{ApprovalRequest, Progress};
+use crate::approvals::{Answer, ApprovalRequest, Progress};
 use crate::pool::{Checkout, OpenFailure};
 use crate::run::{self, Failure, Limits, Ran};
-use crate::settings::MAX_ROWS;
+use crate::settings::{MAX_ROWS, McpSettings};
 use crate::{CallError, Caller, Core, Decision, Error, McpEvent, McpServer, ToolError};
 
 // Arguments and results. Doc comments become the schemas' descriptions,
@@ -411,6 +411,23 @@ struct Refusal {
     source: Option<DataSource>,
 }
 
+/// A read the engine refused for writing (see [`run::refused_as_write`]).
+struct RefusedAsWrite {
+    /// The engine's message.
+    message: String,
+    elapsed_ms: Option<u64>,
+}
+
+/// The audit's statement kind of a read the engine refused as a write,
+/// e.g. `SELECT (engine refused as write)`.
+fn refused_kind(kind: &str) -> String {
+    format!("{kind} (engine refused as write)")
+}
+
+fn read_limits(max_rows: usize, settings: &McpSettings) -> Limits {
+    Limits { max_rows, timeout: settings.statement_timeout(), timeout_setting: "statement timeout" }
+}
+
 impl Core {
     fn list_connections(&self, caller: &Caller) -> Result<ListConnectionsOutput, CallError> {
         self.seen(&caller.client_id, caller.client_info.as_ref());
@@ -576,8 +593,20 @@ impl Core {
             }
         }
         let max_rows = args.max_rows.unwrap_or(settings.max_rows).clamp(1, MAX_ROWS) as usize;
-        let limits = Limits { max_rows, timeout: settings.statement_timeout() };
-        let ran = self.read(&call, &target.source, &args.sql, args.schema.as_deref(), limits, cancel).await?;
+        let limits = read_limits(max_rows, &settings);
+        let ran = match self.read(&call, &target.source, &args.sql, args.schema.as_deref(), limits, cancel).await? {
+            Ok(ran) => ran,
+            Err(refused) => {
+                call.statement_kind = call.statement_kind.as_deref().map(refused_kind);
+                let message = format!(
+                    "The database refused this statement because it writes, although it reads like a query (it may \
+                     call a function that changes data): {}. Use the execute tool instead; the user must approve it.",
+                    refused.message
+                );
+                let outcome = Outcome { elapsed_ms: refused.elapsed_ms, ..Outcome::default() };
+                return call.refuse(Decision::Denied, message, outcome);
+            }
+        };
         call.record(Decision::Allowed, Outcome::ran(&ran))?;
         Ok(QueryOutput {
             columns: result_columns(ran.columns.unwrap_or_default()),
@@ -604,29 +633,50 @@ impl Core {
         let source = target.source;
         let classification = idedb_sql::classify(source.params.engine, &args.sql);
         call.statement_kind = Some(classification.summary.clone());
-        let limits = Limits { max_rows: settings.max_rows as usize, timeout: settings.statement_timeout() };
-        let write_kind = match classification.kind {
-            // A read needs no approval, whichever tool it comes through.
+        let (write_kind, summary, escalated) = match classification.kind {
+            // A read needs no approval, whichever tool it comes through,
+            // unless the engine refuses it for writing: then it goes the way
+            // of any write.
             Kind::Read => {
-                let ran = self.read(&call, &source, &args.sql, args.schema.as_deref(), limits, cancel).await?;
-                call.record(Decision::Allowed, Outcome::ran(&ran))?;
-                return Ok(execute_output(ran));
+                let limits = read_limits(settings.max_rows as usize, &settings);
+                match self.read(&call, &source, &args.sql, args.schema.as_deref(), limits, cancel).await? {
+                    Ok(ran) => {
+                        call.record(Decision::Allowed, Outcome::ran(&ran))?;
+                        return Ok(execute_output(ran));
+                    }
+                    Err(_) => {
+                        let summary = refused_kind(&classification.summary);
+                        call.statement_kind = Some(summary.clone());
+                        (WriteKind::Other, summary, true)
+                    }
+                }
             }
             Kind::Forbidden(kind) => return call.deny(forbidden(kind, &classification.summary)),
-            Kind::Write(kind) => kind,
+            Kind::Write(kind) => (kind, classification.summary.clone(), false),
+        };
+        // Why a read ended up here, before any refusal.
+        let because = |message: String| {
+            if escalated {
+                format!(
+                    "The database refused this statement as a write (it may call a function that changes data), so it \
+                     runs only with the user's approval. {message}"
+                )
+            } else {
+                message
+            }
         };
         if target.access != Access::Write {
-            return call.deny(format!(
+            return call.deny(because(format!(
                 "This client may only read '{}': writing needs write access, which the user grants in IdeDB. Use the \
                  query tool for reads.",
                 source.name
-            ));
+            )));
         }
         if self.host.store().mcp_never_write(&source.id)? {
-            return call.deny(format!(
+            return call.deny(because(format!(
                 "'{}' is marked never-write in IdeDB: no statement that writes runs on it over MCP.",
                 source.name
-            ));
+            )));
         }
 
         let now = Utc::now();
@@ -639,7 +689,7 @@ impl Core {
             data_source_name: source.name.clone(),
             data_source_color: source.color.clone(),
             sql: args.sql.clone(),
-            summary: classification.summary.clone(),
+            summary,
             write_kind,
             warnings: classification.warnings.clone(),
             reason: args.reason.clone(),
@@ -648,24 +698,34 @@ impl Core {
                 .to_rfc3339_opts(SecondsFormat::Millis, true),
         };
         let waiting = Instant::now();
-        let decision = self.approvals.wait(&*self.host, request, settings.approval_timeout(), cancel, progress).await;
+        let client_active = || self.client_active(caller);
+        let answer = self
+            .approvals
+            .wait(&*self.host, request, settings.approval_timeout(), cancel, progress, &client_active)
+            .await;
         let waited = Outcome { approval_wait_ms: Some(waiting.elapsed().as_millis() as u64), ..Outcome::default() };
-        let refused = match decision {
-            Decision::Approved => None,
-            Decision::Rejected => Some(
+        let refused = match answer {
+            Answer::Approved => None,
+            Answer::Rejected => Some(
                 "The user rejected this statement in IdeDB, so it did not run. Don't retry it unchanged; ask the user \
                  what they want instead."
                     .to_owned(),
             ),
-            Decision::Timeout => Some(format!(
+            Answer::Timeout => Some(format!(
                 "Nobody approved the statement in IdeDB within {}s, so it did not run. Ask the user to watch for \
                  IdeDB's approval dialog, then try again.",
                 settings.approval_timeout_secs
             )),
-            _ => Some("The call was cancelled before the user answered in IdeDB; the statement did not run.".to_owned()),
+            Answer::Cancelled => {
+                Some("The call was cancelled before the user answered in IdeDB; the statement did not run.".to_owned())
+            }
+            Answer::Revoked => Some(
+                "This client's access was revoked in IdeDB before the user answered; the statement did not run."
+                    .to_owned(),
+            ),
         };
         if let Some(message) = refused {
-            return call.refuse(decision, message, waited);
+            return call.refuse(answer.decision(), message, waited);
         }
 
         // The user may have changed what this client may do while deciding.
@@ -682,6 +742,11 @@ impl Core {
             return call.refuse(Decision::Denied, message, waited);
         }
 
+        let limits = Limits {
+            max_rows: settings.max_rows as usize,
+            timeout: settings.write_timeout(),
+            timeout_setting: "write timeout",
+        };
         match run::write(&self.host, &source.id, &args.sql, args.schema.as_deref(), limits, cancel).await {
             Ok(ran) => {
                 let outcome = Outcome { approval_wait_ms: waited.approval_wait_ms, ..Outcome::ran(&ran) };
@@ -697,7 +762,9 @@ impl Core {
         }
     }
 
-    /// Runs a read on the client's pooled session.
+    /// Runs a read on the client's pooled session. A failure is audited,
+    /// except the engine refusing the statement for writing, which the
+    /// caller decides about.
     async fn read(
         &self,
         call: &Call<'_>,
@@ -706,11 +773,19 @@ impl Core {
         schema: Option<&str>,
         limits: Limits,
         cancel: &CancellationToken,
-    ) -> Result<Ran, CallError> {
+    ) -> Result<Result<Ran, RefusedAsWrite>, CallError> {
         let checkout = self.checkout(call, source).await?;
-        run::read(&self.host, &checkout, sql, schema, limits, cancel)
-            .await
-            .map_err(|failure| self.failed(call, failure, None, Outcome::default()))
+        match run::read(&self.host, &checkout, sql, schema, limits, cancel).await {
+            Ok(ran) => Ok(Ok(ran)),
+            Err(Failure::RefusedAsWrite { message, elapsed_ms }) => Ok(Err(RefusedAsWrite { message, elapsed_ms })),
+            Err(failure) => Err(self.failed(call, failure, None, Outcome::default())),
+        }
+    }
+
+    /// Whether the client is still registered and not revoked.
+    fn client_active(&self, caller: &Caller) -> bool {
+        let client = self.host.store().mcp_client(&caller.client_id);
+        client.ok().flatten().is_some_and(|client| client.revoked_at.is_none())
     }
 
     /// The client's pooled session on `source`; a failure to open it is
@@ -727,7 +802,11 @@ impl Core {
     /// policy counts as denied, anything else as allowed.
     fn failed(&self, call: &Call<'_>, failure: Failure, decision: Option<Decision>, outcome: Outcome) -> CallError {
         let (policy, message, elapsed_ms) = match failure {
-            Failure::Statement { message, elapsed_ms } => (Decision::Allowed, message, elapsed_ms),
+            // A read-write session refusing to write: the server itself is
+            // read only (a replica, say).
+            Failure::Statement { message, elapsed_ms } | Failure::RefusedAsWrite { message, elapsed_ms } => {
+                (Decision::Allowed, message, elapsed_ms)
+            }
             Failure::Open(OpenFailure::Open(OpenError::PasswordRequired(_))) => {
                 (Decision::Denied, NO_PASSWORD.to_owned(), None)
             }

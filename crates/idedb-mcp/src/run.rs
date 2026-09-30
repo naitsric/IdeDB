@@ -22,6 +22,9 @@ use crate::pool::{self, Checkout, OpenFailure};
 pub(crate) struct Limits {
     pub max_rows: usize,
     pub timeout: Duration,
+    /// The setting `timeout` comes from, for the message when it hits:
+    /// `statement timeout` or `write timeout`.
+    pub timeout_setting: &'static str,
 }
 
 /// What a statement returned.
@@ -45,11 +48,34 @@ pub(crate) enum Failure {
     /// The engine refused or failed the statement, or it was stopped. The
     /// message is for the model.
     Statement { message: String, elapsed_ms: Option<u64> },
+    /// The engine refused the statement for writing on a read-only session
+    /// (see [`refused_as_write`]): it reads like a query but writes, e.g.
+    /// through a function that changes data. `message` is the engine's.
+    RefusedAsWrite { message: String, elapsed_ms: Option<u64> },
 }
 
 impl Failure {
     fn statement(message: impl Into<String>) -> Self {
         Self::Statement { message: message.into(), elapsed_ms: None }
+    }
+}
+
+/// Whether `message`, the error of a statement on a read-only session, is
+/// the engine refusing it for writing:
+/// - Postgres, SQLSTATE 25006: `cannot execute INSERT in a read-only
+///   transaction`;
+/// - MySQL, error 1792: `Cannot execute statement in a READ ONLY
+///   transaction.`;
+/// - SQLite, `SQLITE_READONLY`: `attempt to write a readonly database`.
+///
+/// Query events carry the message only (no SQLSTATE), so this matches the
+/// same texts the drivers' conformance tests do.
+pub(crate) fn refused_as_write(engine: Engine, message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    match engine {
+        Engine::Postgres => message.contains("in a read-only transaction"),
+        Engine::Mysql => message.starts_with("error 1792 ") || message.contains("in a read only transaction"),
+        Engine::Sqlite => message.contains("attempt to write a readonly database"),
     }
 }
 
@@ -106,7 +132,7 @@ pub(crate) async fn read(
                 Err(e) => Err(e),
             };
             let outcome = match guarded {
-                Ok(()) => statement(session, canceller, sql, limits, cancel).await.0,
+                Ok(()) => statement(session, engine, canceller, sql, limits, cancel).await.0,
                 Err(e) => Err(Failure::statement(format!("IdeDB could not start a read-only transaction: {e}"))),
             };
             session.close_result().await;
@@ -118,17 +144,21 @@ pub(crate) async fn read(
         Engine::Mysql => match simple(session, "SET SESSION TRANSACTION READ ONLY").await {
             Err(e) => (Err(Failure::statement(format!("IdeDB could not make the session read only: {e}"))), false),
             Ok(()) => match session.check(sql, None).await {
+                // MySQL refuses some writes as soon as it prepares them.
+                Ok(Some(problem)) if refused_as_write(engine, &problem.message) => {
+                    (Err(Failure::RefusedAsWrite { message: problem.message, elapsed_ms: None }), true)
+                }
                 Ok(Some(problem)) => (Err(Failure::statement(problem.message)), true),
                 Err(e) => (Err(Failure::statement(e.to_string())), true),
                 Ok(None) => {
-                    let (outcome, in_transaction) = statement(session, canceller, sql, limits, cancel).await;
+                    let (outcome, in_transaction) = statement(session, engine, canceller, sql, limits, cancel).await;
                     session.close_result().await;
                     (outcome, !in_transaction)
                 }
             },
         },
         Engine::Sqlite => {
-            let (outcome, in_transaction) = statement(session, canceller, sql, limits, cancel).await;
+            let (outcome, in_transaction) = statement(session, engine, canceller, sql, limits, cancel).await;
             session.close_result().await;
             (outcome, !in_transaction)
         }
@@ -164,7 +194,8 @@ pub(crate) async fn write(
         }
     }
     let canceller = session.canceller();
-    let (outcome, in_transaction) = statement(&mut session, canceller, sql, limits, cancel).await;
+    let engine = source.params.engine;
+    let (outcome, in_transaction) = statement(&mut session, engine, canceller, sql, limits, cancel).await;
     session.close_result().await;
     if in_transaction {
         let _ = simple(&mut session, "rollback").await;
@@ -205,6 +236,7 @@ enum Stop {
 /// a transaction is open after it.
 async fn statement(
     session: &mut AnySession,
+    engine: Engine,
     canceller: AnyCanceller,
     sql: &str,
     limits: Limits,
@@ -228,9 +260,10 @@ async fn statement(
         Some(Stop::Cancelled) => CANCELLED.to_owned(),
         // Postgres' own statement_timeout may beat the timer.
         _ => format!(
-            "The statement was cancelled after {}s, IdeDB's statement timeout. Make it cheaper (a narrower WHERE, a \
-             LIMIT, an aggregate) or ask the user to raise the timeout in IdeDB's MCP settings.",
-            limits.timeout.as_secs()
+            "The statement was cancelled after {}s, IdeDB's {}. Make it cheaper (a narrower WHERE, a LIMIT, an \
+             aggregate) or ask the user to raise the timeout in IdeDB's MCP settings.",
+            limits.timeout.as_secs(),
+            limits.timeout_setting
         ),
     };
     let Collector { columns, rows, dropped, last, .. } = collector;
@@ -244,11 +277,13 @@ async fn statement(
             (Ok(Ran { columns, rows, row_count, truncated, elapsed_ms }), in_transaction)
         }
         Some(QueryEvent::Error { message, in_transaction, .. }) => {
-            let message = match stopped {
-                Some(_) => format!("{} ({message})", stop_message(stopped)),
-                None => message,
+            let elapsed_ms = Some(elapsed_ms);
+            let failure = match stopped {
+                Some(_) => Failure::Statement { message: format!("{} ({message})", stop_message(stopped)), elapsed_ms },
+                None if refused_as_write(engine, &message) => Failure::RefusedAsWrite { message, elapsed_ms },
+                None => Failure::Statement { message, elapsed_ms },
             };
-            (Err(Failure::Statement { message, elapsed_ms: Some(elapsed_ms) }), in_transaction)
+            (Err(failure), in_transaction)
         }
         _ => (Err(Failure::statement("The database session reported no outcome for the statement.")), true),
     }
@@ -281,8 +316,7 @@ async fn watch(
 /// skip themselves without them.
 #[cfg(test)]
 mod tests {
-    use idedb_core::{ConnectionParams, SslMode};
-    use idedb_store::{DataSource, SecretStore};
+    use idedb_store::DataSource;
     use serde_json::json;
 
     use super::*;
@@ -303,29 +337,9 @@ mod tests {
     }
 
     fn server_on(var: &str, engine: Engine, database: Option<&str>) -> Option<Server> {
-        let Ok(url) = std::env::var(var) else {
-            eprintln!("{var} not set, skipping");
-            return None;
-        };
-        let (_, rest) = url.split_once("://").expect("scheme");
-        let (auth, address) = rest.rsplit_once('@').expect("credentials");
-        let (user, password) = auth.split_once(':').expect("user:password");
-        let (host_port, url_database) = address.split_once('/').unwrap_or((address, ""));
-        let (host, port) = host_port.split_once(':').expect("host:port");
-        let params = ConnectionParams {
-            engine,
-            host: host.into(),
-            port: Some(port.parse().expect("port")),
-            user: user.into(),
-            database: database.unwrap_or(url_database).into(),
-            ssl_mode: SslMode::Disable,
-            path: String::new(),
-        };
         let test = TestHost::new();
-        let source =
-            test.save(DataSource { id: String::new(), name: var.into(), params, color: None, save_password: true });
-        test.secrets.set(&source.id, password).unwrap();
-        Some(Server { host: test, source, password: password.into(), pool: Pool::default() })
+        let (source, password) = test.save_server(var, engine, database)?;
+        Some(Server { host: test, source, password, pool: Pool::default() })
     }
 
     impl Server {
@@ -338,8 +352,7 @@ mod tests {
         }
 
         async fn read(&self, checkout: &Checkout, sql: &str, schema: Option<&str>, timeout_secs: u64) -> Result<Ran, Failure> {
-            let limits = Limits { max_rows: 10, timeout: Duration::from_secs(timeout_secs) };
-            read(&self.host, checkout, sql, schema, limits, &CancellationToken::new()).await
+            read(&self.host, checkout, sql, schema, limits(timeout_secs), &CancellationToken::new()).await
         }
 
         async fn rows(&self, checkout: &Checkout, sql: &str, schema: Option<&str>) -> Vec<Vec<Json>> {
@@ -348,6 +361,10 @@ mod tests {
                 Err(failure) => panic!("{sql}: {failure:?}"),
             }
         }
+    }
+
+    fn limits(timeout_secs: u64) -> Limits {
+        Limits { max_rows: 10, timeout: Duration::from_secs(timeout_secs), timeout_setting: "statement timeout" }
     }
 
     fn statement_error(outcome: Result<Ran, Failure>) -> String {
@@ -433,8 +450,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(300)).await;
             stop.cancel();
         });
-        let limits = Limits { max_rows: 10, timeout: Duration::from_secs(30) };
-        let cancelled = read(&server.host, &checkout, "select pg_sleep(5)", None, limits, &cancel).await;
+        let cancelled = read(&server.host, &checkout, "select pg_sleep(5)", None, limits(30), &cancel).await;
         assert_eq!(statement_error(cancelled), CANCELLED);
         assert!(outside_transaction(&direct(&checkout, "select 1").await));
 
@@ -488,5 +504,56 @@ mod tests {
         assert_eq!(server.rows(&checkout, current, Some("information_schema")).await, [[json!("information_schema")]]);
         assert_eq!(server.rows(&checkout, current, None).await, [[Json::Null]]);
         assert_eq!(server.rows(&checkout, current, Some("idedb")).await, [[json!("idedb")]]);
+    }
+
+    #[test]
+    fn recognizes_each_engines_refusal_of_a_write() {
+        let refusals = [
+            (Engine::Postgres, "ERROR: cannot execute INSERT in a read-only transaction"),
+            (Engine::Postgres, "ERROR: cannot execute nextval() in a read-only transaction"),
+            (Engine::Mysql, "ERROR 1792 (25006): Cannot execute statement in a READ ONLY transaction."),
+            (Engine::Sqlite, "attempt to write a readonly database"),
+        ];
+        for (engine, message) in refusals {
+            assert!(refused_as_write(engine, message), "{engine:?} {message}");
+        }
+        let others = [
+            (Engine::Postgres, "ERROR: division by zero"),
+            (Engine::Postgres, "ERROR: relation \"t\" does not exist"),
+            (Engine::Mysql, "ERROR 1146 (42S02): Table 'idedb.t' doesn't exist"),
+            (Engine::Sqlite, "no such table: t"),
+            // Each engine's text only counts for that engine.
+            (Engine::Sqlite, "ERROR: cannot execute INSERT in a read-only transaction"),
+        ];
+        for (engine, message) in others {
+            assert!(!refused_as_write(engine, message), "{engine:?} {message}");
+        }
+    }
+
+    /// A write that reaches the engine through the read path (the tools'
+    /// classifier would have stopped it) fails as refused, with the engine's
+    /// message: what `execute` escalates to approval.
+    async fn reports_a_refused_write(var: &str, engine: Engine, name: &str) {
+        let Some(server) = server(var, engine) else { return };
+        let probe = probe(name);
+        server.exec(&format!("create table {probe} (id int)")).await;
+        let checkout = server.checkout().await;
+        match server.read(&checkout, &format!("insert into {probe} values (1)"), None, 30).await {
+            // MySQL refuses it while preparing it, before running anything.
+            Err(Failure::RefusedAsWrite { message, .. }) => assert!(refused_as_write(engine, &message), "{message}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(server.exec(&format!("select count(*) from {probe}")).await, [[idedb_core::Value::Int(0)]]);
+        server.exec(&format!("drop table {probe}")).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_reports_a_refused_write() {
+        reports_a_refused_write("IDEDB_PG_URL", Engine::Postgres, "refused").await;
+    }
+
+    #[tokio::test]
+    async fn mysql_reports_a_refused_write() {
+        reports_a_refused_write("IDEDB_MYSQL_URL", Engine::Mysql, "refused").await;
     }
 }

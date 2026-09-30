@@ -1,3 +1,4 @@
+use idedb_drivers::OpenError;
 use serde::Serialize;
 
 /// Error returned by every command. `code` lets the UI react (for example,
@@ -44,4 +45,39 @@ impl From<idedb_store::Error> for CommandError {
     }
 }
 
+impl From<OpenError> for CommandError {
+    fn from(e: OpenError) -> Self {
+        match e {
+            OpenError::NotFound => Self::new(ErrorCode::NotFound, e.to_string()),
+            OpenError::PasswordRequired(message) => Self::new(ErrorCode::PasswordRequired, message),
+            OpenError::Store(e) => e.into(),
+            OpenError::Driver(e) => e.into(),
+        }
+    }
+}
+
 pub type CommandResult<T> = Result<T, CommandError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_errors_keep_their_codes_and_messages() {
+        let not_found = CommandError::from(OpenError::NotFound);
+        assert!(matches!(not_found.code, ErrorCode::NotFound));
+        assert_eq!(not_found.message, "data source not found");
+
+        let required = CommandError::from(OpenError::PasswordRequired("Password for db is not saved".into()));
+        assert!(matches!(required.code, ErrorCode::PasswordRequired));
+        assert_eq!(required.message, "Password for db is not saved");
+
+        let store = CommandError::from(OpenError::from(idedb_store::Error::Secret("denied".into())));
+        assert!(matches!(store.code, ErrorCode::Storage));
+        assert_eq!(store.message, "keychain error: denied");
+
+        let driver = CommandError::from(OpenError::from(idedb_core::Error::Connect("refused".into())));
+        assert!(matches!(driver.code, ErrorCode::Connect));
+        assert_eq!(driver.message, "connection failed: refused");
+    }
+}

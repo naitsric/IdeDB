@@ -2,6 +2,12 @@
 //! methods), so the app holds an enum; adding an engine means one variant
 //! here. Postgres' session and canceller carry the client and TLS connector
 //! inline, so they are boxed to keep the enums small.
+//!
+//! [`open_data_source`] opens a session on a saved data source.
+
+mod open;
+
+pub use open::{OpenError, open_data_source, resolve_password};
 
 use idedb_core::{
     ApplyOutcome, Canceller, ConnectionParams, Engine, Fetch, QueryEvent, Result, RowChange, SchemaInfo,

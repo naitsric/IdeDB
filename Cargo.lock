@@ -1635,9 +1635,7 @@ name = "idedb"
 version = "0.1.2"
 dependencies = [
  "idedb-core",
- "idedb-driver-mysql",
- "idedb-driver-pg",
- "idedb-driver-sqlite",
+ "idedb-drivers",
  "idedb-store",
  "rmp-serde",
  "serde",
@@ -1692,6 +1690,20 @@ dependencies = [
  "idedb-core",
  "rusqlite",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "idedb-drivers"
+version = "0.1.2"
+dependencies = [
+ "idedb-core",
+ "idedb-driver-mysql",
+ "idedb-driver-pg",
+ "idedb-driver-sqlite",
+ "idedb-store",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

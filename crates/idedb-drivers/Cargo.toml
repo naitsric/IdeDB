@@ -1,0 +1,17 @@
+[package]
+name = "idedb-drivers"
+description = "Dispatch over idedb's drivers and opening sessions on saved data sources"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+idedb-core.workspace = true
+idedb-driver-mysql.workspace = true
+idedb-driver-pg.workspace = true
+idedb-driver-sqlite.workspace = true
+idedb-store.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio.workspace = true

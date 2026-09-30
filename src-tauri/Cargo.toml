@@ -15,9 +15,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 idedb-core.workspace = true
-idedb-driver-mysql.workspace = true
-idedb-driver-pg.workspace = true
-idedb-driver-sqlite.workspace = true
+idedb-drivers.workspace = true
 idedb-store.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true

@@ -63,12 +63,13 @@ src/                 React UI
                      editor: filters, pending changes, copy/export, value viewer
   db/                typed IPC with the Rust core; data source, console, transaction
                      and result-paging state
-src-tauri/           Tauri app: commands exposed to the UI, driver dispatch, menu
+src-tauri/           Tauri app: commands exposed to the UI, menu
 crates/
   idedb-core/           engine-agnostic types, the Session trait, conformance tests
   idedb-driver-pg/      PostgreSQL (tokio-postgres)
   idedb-driver-mysql/   MySQL (mysql_async)
   idedb-driver-sqlite/  SQLite (rusqlite, bundled)
+  idedb-drivers/        dispatch over the drivers (AnySession), opening a saved data source
   idedb-store/          data sources and query history (local SQLite), passwords (Keychain)
 ```
 

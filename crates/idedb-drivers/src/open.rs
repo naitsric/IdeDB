@@ -1,7 +1,7 @@
 //! Opening a session on a saved data source: look it up, resolve its
 //! password, connect.
 
-use idedb_core::Engine;
+use idedb_core::{ConnectOptions, Engine};
 use idedb_store::{DataSource, SecretStore, Store};
 
 use crate::AnySession;
@@ -21,17 +21,32 @@ pub enum OpenError {
 }
 
 /// Connects to the saved data source `id` with `password`, or the stored
-/// one when `None` (see [`resolve_password`]).
+/// one when `None` (see [`resolve_password`]), set up as `options` asks.
 pub async fn open_data_source(
     store: &Store,
     secrets: &dyn SecretStore,
     id: &str,
     password: Option<String>,
+    options: ConnectOptions,
 ) -> Result<(DataSource, AnySession), OpenError> {
+    let (source, password) = resolve_data_source(store, secrets, id, password)?;
+    let session = AnySession::connect_with(&source.params, password.as_deref(), options).await?;
+    Ok((source, session))
+}
+
+/// The part of [`open_data_source`] before connecting: the saved data
+/// source and the password to connect with. It blocks on the store and the
+/// Keychain (which may ask the user), so async callers that must not stall
+/// run it on a blocking thread.
+pub fn resolve_data_source(
+    store: &Store,
+    secrets: &dyn SecretStore,
+    id: &str,
+    password: Option<String>,
+) -> Result<(DataSource, Option<String>), OpenError> {
     let source = store.get(id)?.ok_or(OpenError::NotFound)?;
     let password = resolve_password(&source, password, secrets)?;
-    let session = AnySession::connect(&source.params, password.as_deref()).await?;
-    Ok((source, session))
+    Ok((source, password))
 }
 
 /// The password to connect with: the one given, else the stored one. When
@@ -119,7 +134,7 @@ mod tests {
     #[tokio::test]
     async fn open_fails_for_a_missing_data_source() {
         let store = Store::in_memory().unwrap();
-        let opened = open_data_source(&store, &MemorySecrets::default(), "missing", None).await;
+        let opened = open_data_source(&store, &MemorySecrets::default(), "missing", None, ConnectOptions::default()).await;
         assert!(matches!(opened, Err(OpenError::NotFound)));
     }
 
@@ -127,7 +142,7 @@ mod tests {
     async fn open_asks_for_a_password_that_is_not_saved() {
         let store = Store::in_memory().unwrap();
         let saved = store.save(DataSource { id: String::new(), ..source(Engine::Postgres, false) }).unwrap();
-        let opened = open_data_source(&store, &MemorySecrets::default(), &saved.id, None).await;
+        let opened = open_data_source(&store, &MemorySecrets::default(), &saved.id, None, ConnectOptions::default()).await;
         match opened {
             Err(OpenError::PasswordRequired(message)) => assert_eq!(message, "Password for db is not saved"),
             Err(e) => panic!("expected PasswordRequired, got {e:?}"),
@@ -145,10 +160,32 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let saved = store.save(sqlite).unwrap();
 
-        let (opened, session) = open_data_source(&store, &MemorySecrets::default(), &saved.id, None).await.unwrap();
+        let (opened, session) =
+            open_data_source(&store, &MemorySecrets::default(), &saved.id, None, ConnectOptions::default())
+                .await
+                .unwrap();
         assert_eq!(opened, saved);
         assert!(matches!(session, AnySession::Sqlite(_)));
         assert_eq!(session.server_info().engine, Engine::Sqlite);
         assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn opens_with_the_options_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sqlite = source(Engine::Sqlite, false);
+        sqlite.id = String::new();
+        sqlite.params.path = dir.path().join("missing.db").to_str().unwrap().to_owned();
+        let store = Store::in_memory().unwrap();
+        let saved = store.save(sqlite).unwrap();
+
+        // Read only, a missing file is not created.
+        let read_only = ConnectOptions { read_only: true };
+        let opened = open_data_source(&store, &MemorySecrets::default(), &saved.id, None, read_only).await;
+        assert!(matches!(opened, Err(OpenError::Driver(_))));
+        assert!(!dir.path().join("missing.db").exists());
+
+        let (resolved, password) = resolve_data_source(&store, &MemorySecrets::default(), &saved.id, None).unwrap();
+        assert_eq!((resolved, password), (saved, None));
     }
 }

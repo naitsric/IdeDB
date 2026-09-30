@@ -236,6 +236,11 @@ impl Store {
         Ok(client_by_id(&db, &id)?.expect("client just inserted"))
     }
 
+    /// With its grants; revoked or not.
+    pub fn mcp_client(&self, id: &str) -> Result<Option<McpClient>> {
+        client_by_id(&self.db.lock().unwrap(), id)
+    }
+
     /// The client this token authenticates; never a revoked one.
     pub fn mcp_client_by_token_hash(&self, token_hash: &[u8; 32]) -> Result<Option<McpClient>> {
         let db = self.db.lock().unwrap();
@@ -293,18 +298,29 @@ impl Store {
         Ok(())
     }
 
-    /// Marks the client seen now, with the `clientInfo` it declared. Without
+    /// Marks the client seen now, with the `clientInfo` it declared, and
+    /// returns the time recorded (None if there is no such client). Without
     /// a `client_name` the last declared name and version are kept.
-    pub fn mcp_touch_client(&self, id: &str, client_name: Option<&str>, client_version: Option<&str>) -> Result<()> {
-        self.db.lock().unwrap().execute(
-            "update mcp_client set
-               last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-               last_client_name = coalesce(?2, last_client_name),
-               last_client_version = case when ?2 is null then last_client_version else ?3 end
-             where id = ?1",
-            params![id, client_name, client_version],
-        )?;
-        Ok(())
+    pub fn mcp_touch_client(
+        &self,
+        id: &str,
+        client_name: Option<&str>,
+        client_version: Option<&str>,
+    ) -> Result<Option<String>> {
+        let db = self.db.lock().unwrap();
+        let seen = db
+            .query_row(
+                "update mcp_client set
+                   last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                   last_client_name = coalesce(?2, last_client_name),
+                   last_client_version = case when ?2 is null then last_client_version else ?3 end
+                 where id = ?1
+                 returning last_seen_at",
+                params![id, client_name, client_version],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(seen)
     }
 
     /// Replaces all of the client's grants at once and returns the client
@@ -689,6 +705,10 @@ mod tests {
         let revoked = store.mcp_client_revoke(&client.id).unwrap().unwrap();
         let revoked_at = revoked.revoked_at.clone().expect("revoked_at set");
         assert_eq!(store.mcp_client_by_token_hash(&hash(1)).unwrap(), None);
+        // Still found by id, grants included, so callers can tell it is revoked.
+        assert_eq!(store.mcp_client(&client.id).unwrap(), Some(revoked.clone()));
+        assert_eq!(revoked.grants, [grant(&ds, Access::Read)]);
+        assert_eq!(store.mcp_client("missing").unwrap(), None);
         // Still listed, and revoking again keeps the first time.
         assert_eq!(store.mcp_clients().unwrap(), [revoked]);
         let again = store.mcp_client_revoke(&client.id).unwrap().unwrap();
@@ -726,9 +746,11 @@ mod tests {
     fn touching_records_last_seen_and_client_info() {
         let store = Store::in_memory().unwrap();
         let client = store.mcp_client_create("claude-code", &hash(1), "idedb_aa").unwrap();
-        store.mcp_touch_client(&client.id, Some("claude-code"), Some("2.1.0")).unwrap();
+        let at = store.mcp_touch_client(&client.id, Some("claude-code"), Some("2.1.0")).unwrap();
         let seen = store.mcp_client_by_token_hash(&hash(1)).unwrap().unwrap();
         assert!(seen.last_seen_at.as_deref().is_some_and(|at| at.ends_with('Z')), "{:?}", seen.last_seen_at);
+        assert_eq!(at, seen.last_seen_at);
+        assert_eq!(store.mcp_touch_client("missing", None, None).unwrap(), None);
         assert_eq!(seen.last_client_name.as_deref(), Some("claude-code"));
         assert_eq!(seen.last_client_version.as_deref(), Some("2.1.0"));
 

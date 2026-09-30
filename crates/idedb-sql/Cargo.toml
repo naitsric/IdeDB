@@ -1,0 +1,13 @@
+[package]
+name = "idedb-sql"
+description = "SQL statement classifier for IdeDB's MCP server: read, write or forbidden"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+idedb-core.workspace = true
+serde.workspace = true
+sqlparser.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

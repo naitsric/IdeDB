@@ -1632,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "idedb"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "idedb-core",
  "idedb-driver-mysql",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "idedb-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -1662,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "idedb-driver-mysql"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "idedb-core",
  "mysql_async",
@@ -1671,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "idedb-driver-pg"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "fallible-iterator 0.2.0",
@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "idedb-driver-sqlite"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "idedb-core",
  "rusqlite",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "idedb-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "idedb-core",
  "rusqlite",

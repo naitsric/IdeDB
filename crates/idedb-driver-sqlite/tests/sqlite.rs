@@ -2,8 +2,8 @@
 
 use idedb_core::testing::{self, collect, rows};
 use idedb_core::{
-    Canceller, ColumnInfo, ConnectionParams, Engine, Error, ForeignKey, ObjectKind, QueryEvent, SchemaInfo, Session, SslMode,
-    Value,
+    Canceller, ColumnInfo, ConnectOptions, ConnectionParams, Engine, Error, ForeignKey, ObjectKind, QueryEvent, SchemaInfo,
+    Session, SslMode, Value,
 };
 use idedb_driver_sqlite::SqliteSession;
 use tempfile::TempDir;
@@ -371,4 +371,115 @@ async fn checks_report_problems_where_sqlite_locates_them() {
         Some("nope"),
     )
     .await;
+}
+
+const READ_ONLY: ConnectOptions = ConnectOptions { read_only: true };
+
+/// A read-only session on a file a read-write one set up with `statements`.
+async fn read_only_session(statements: &[&str]) -> (TempDir, SqliteSession) {
+    let (dir, mut rw) = session().await;
+    for sql in statements {
+        run(&mut rw, sql).await;
+    }
+    drop(rw);
+    let path = dir.path().join("test.db");
+    let ro = SqliteSession::connect_with(&params(path.to_str().unwrap()), None, READ_ONLY).await.expect("connect");
+    (dir, ro)
+}
+
+/// The names of the files in `dir`, sorted.
+fn files(dir: &TempDir) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn read_only_refuses_writes() {
+    let (_dir, mut s) = read_only_session(&[
+        "create table idedb_read_only (id integer primary key)",
+        "insert into idedb_read_only values (1)",
+    ])
+    .await;
+    testing::read_only_refuses_writes(&mut s, "insert into idedb_read_only values (2)", "select id from idedb_read_only")
+        .await;
+    // Nor can it change the schema.
+    let events = collect(&mut s, "create table idedb_other (id int)", 10).await;
+    assert!(matches!(events.last(), Some(QueryEvent::Error { .. })), "{events:?}");
+}
+
+/// Read only, a missing file is an error rather than a new database.
+#[tokio::test]
+async fn read_only_never_creates_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing.db");
+    let opened = SqliteSession::connect_with(&params(missing.to_str().unwrap()), None, READ_ONLY).await;
+    assert!(matches!(opened, Err(Error::Connect(_))), "{:?}", opened.err());
+    assert!(files(&dir).is_empty(), "created {:?}", files(&dir));
+}
+
+/// URIs are refused read only: `cache=shared` would join the cache of a
+/// read-write connection to the same file, and write through it.
+#[tokio::test]
+async fn read_only_refuses_uri_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.db");
+    let shared = format!("file:{}?cache=shared", path.display());
+    let mut rw = SqliteSession::connect(&params(&shared), None).await.expect("connect");
+    run(&mut rw, "create table t (id int)").await;
+
+    for uri in [shared, format!("file:{}?mode=rw", path.display()), format!("file:{}", path.display())] {
+        let opened = SqliteSession::connect_with(&params(&uri), None, READ_ONLY).await;
+        assert!(matches!(&opened, Err(Error::InvalidParams(m)) if m.contains("URI")), "{uri}: {:?}", opened.err());
+    }
+    assert_eq!(files(&dir), ["test.db"]);
+}
+
+/// A read-only session cannot reach other files: not by attaching them
+/// (which could create them, or open them read-write), not with `VACUUM INTO`.
+#[tokio::test]
+async fn read_only_cannot_attach_or_create_files() {
+    let (dir, mut s) = read_only_session(&["create table t (id int)"]).await;
+    let before = files(&dir);
+    for sql in [
+        format!("attach database '{}' as other", dir.path().join("other.db").display()),
+        format!("attach database 'file:{}?mode=rwc' as other", dir.path().join("uri.db").display()),
+        format!("vacuum into '{}'", dir.path().join("copy.db").display()),
+    ] {
+        let events = collect(&mut s, &sql, 10).await;
+        assert!(
+            matches!(events.last(), Some(QueryEvent::Error { message, .. }) if message.contains("too many attached databases")),
+            "{sql}: {events:?}"
+        );
+    }
+    assert_eq!(files(&dir), before);
+    let schemas: Vec<String> = s.schemas().await.unwrap().into_iter().map(|s| s.name).collect();
+    assert_eq!(schemas, ["main"]);
+    testing::assert_usable(&mut s).await;
+}
+
+/// A database in WAL mode, the usual choice of apps that share their file,
+/// opens read only too.
+#[tokio::test]
+async fn read_only_reads_a_wal_database() {
+    let (_dir, mut s) =
+        read_only_session(&["pragma journal_mode = wal", "create table t (id int)", "insert into t values (1)"]).await;
+    testing::read_only_refuses_writes(&mut s, "insert into t values (2)", "select id from t").await;
+    assert_eq!(rows(&collect(&mut s, "select id from t", 10).await), vec![vec![Value::Int(1)]]);
+}
+
+/// Without options a session is read-write, as `connect` makes it.
+#[tokio::test]
+async fn connects_read_write_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new.db");
+    let mut s = SqliteSession::connect_with(&params(path.to_str().unwrap()), None, ConnectOptions::default())
+        .await
+        .expect("connect");
+    assert!(path.exists(), "database file is created on connect");
+    run(&mut s, "create table t (id int)").await;
+    run(&mut s, "insert into t values (1)").await;
 }

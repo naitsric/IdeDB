@@ -58,6 +58,24 @@ impl ConnectionParams {
     }
 }
 
+/// How a driver's `connect_with` sets up the session, beyond where to
+/// connect. The default is what `connect` does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectOptions {
+    /// The engine itself refuses writes, whatever the SQL: Postgres and
+    /// MySQL make every transaction of the session read only (reconnecting
+    /// restores it), SQLite opens the file read only and cannot attach
+    /// others. Only SQLite still lets the session create and write
+    /// temporary tables, which live outside the file.
+    ///
+    /// In Postgres and MySQL a statement can lift it (`SET SESSION
+    /// CHARACTERISTICS AS TRANSACTION READ WRITE` or `BEGIN READ WRITE`;
+    /// `SET SESSION TRANSACTION READ WRITE` or `START TRANSACTION READ
+    /// WRITE`), so whoever runs untrusted SQL on such a session must also
+    /// refuse those. Only a read-only database user closes that for good.
+    pub read_only: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {

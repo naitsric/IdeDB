@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::{TryStreamExt, pin_mut};
 use idedb_core::{
-    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged, Pager,
-    QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
+    ApplyOutcome, Canceller, Column, ConnectOptions, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged,
+    Pager, QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
     TableRef,
 };
 use postgres_native_tls::MakeTlsConnector;
@@ -48,6 +48,8 @@ pub struct PgSession {
     client: Client,
     /// How to connect again when the connection is lost.
     config: Config,
+    /// How the session was set up, restored on reconnect.
+    options: ConnectOptions,
     cancel: Arc<CancelState>,
     server: ServerInfo,
     connection: JoinHandle<()>,
@@ -62,6 +64,12 @@ pub struct PgSession {
 /// Name of the cursor (and, inside the user's block, the savepoint) that
 /// holds a paused read.
 const CURSOR: &str = "idedb_result";
+
+/// Makes every transaction the session runs read only, for
+/// [`ConnectOptions::read_only`]: the driver's own read transactions and
+/// the user's blocks alike. Set on the open session rather than through the
+/// startup packet's `options`, which pgbouncer rejects.
+const READ_ONLY: &str = "set session characteristics as transaction read only";
 
 /// A read paused at its fetch limit, on the [`CURSOR`].
 struct OpenResult {
@@ -164,6 +172,15 @@ struct Pumped {
 
 impl PgSession {
     pub async fn connect(params: &ConnectionParams, password: Option<&str>) -> Result<Self> {
+        Self::connect_with(params, password, ConnectOptions::default()).await
+    }
+
+    /// Like [`connect`](Self::connect), set up as `options` asks.
+    pub async fn connect_with(
+        params: &ConnectionParams,
+        password: Option<&str>,
+        options: ConnectOptions,
+    ) -> Result<Self> {
         let mut config = Config::new();
         config
             .host(if params.host.is_empty() { "localhost" } else { &params.host })
@@ -182,6 +199,9 @@ impl PgSession {
         }
         let tls = tls_connector(params.ssl_mode)?;
         let (client, connection) = open(&config, &tls).await.map_err(|e| Error::Connect(format_error(&e)))?;
+        if options.read_only {
+            client.batch_execute(READ_ONLY).await.map_err(|e| Error::Connect(format_error(&e)))?;
+        }
 
         let row = client
             .query_one("select current_setting('server_version'), current_schema()", &[])
@@ -199,12 +219,26 @@ impl PgSession {
             guard: Mutex::new(Guard::default()),
             request_done: Notify::new(),
         });
-        Ok(Self { client, config, cancel, server, connection, in_transaction: false, schema: None, open: None })
+        Ok(Self {
+            client,
+            config,
+            options,
+            cancel,
+            server,
+            connection,
+            in_transaction: false,
+            schema: None,
+            open: None,
+        })
     }
 
-    /// Replaces a lost connection, restoring the search path the console chose.
+    /// Replaces a lost connection, restoring read-only mode and the search
+    /// path the console chose.
     async fn reconnect(&mut self) -> Result<(), tokio_postgres::Error> {
         let (client, connection) = open(&self.config, &self.cancel.tls).await?;
+        if self.options.read_only {
+            client.batch_execute(READ_ONLY).await?;
+        }
         if let Some(schema) = &self.schema {
             client.batch_execute(&format!("set search_path to {}", search_path(schema))).await?;
         }

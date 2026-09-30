@@ -5,7 +5,7 @@
 //! Without `IDEDB_MYSQL_URL` these tests are skipped.
 
 use idedb_core::testing::{self, collect, rows};
-use idedb_core::{ConnectionParams, Engine, ObjectKind, QueryEvent, Session, SslMode, Value};
+use idedb_core::{ConnectOptions, ConnectionParams, Engine, ObjectKind, QueryEvent, Session, SslMode, Value};
 use idedb_driver_mysql::MySqlSession;
 use mysql_async::Opts;
 
@@ -13,6 +13,10 @@ use mysql_async::Opts;
 type ColumnSummary<'a> = (&'a str, &'a str, bool, Option<u16>, Option<&'a str>);
 
 async fn session_with(ssl_mode: SslMode) -> Option<MySqlSession> {
+    connect(ssl_mode, ConnectOptions::default()).await
+}
+
+async fn connect(ssl_mode: SslMode, options: ConnectOptions) -> Option<MySqlSession> {
     let Ok(url) = std::env::var("IDEDB_MYSQL_URL") else {
         eprintln!("IDEDB_MYSQL_URL not set, skipping");
         return None;
@@ -28,7 +32,7 @@ async fn session_with(ssl_mode: SslMode) -> Option<MySqlSession> {
         path: String::new(),
     };
     Some(
-        MySqlSession::connect(&params, opts.pass())
+        MySqlSession::connect_with(&params, opts.pass(), options)
             .await
             .expect("connect"),
     )
@@ -573,4 +577,49 @@ async fn checks_and_sets_schema() {
     s.set_schema("idedb").await.unwrap();
     let events = collect(&mut s, sql, 10).await;
     assert!(matches!(events.last(), Some(QueryEvent::Error { .. })), "{events:?}");
+}
+
+/// A read-only session, next to a read-write one that created `table` with
+/// one row for it to read. Not a temporary table: MySQL lets a read-only
+/// session write to its own.
+async fn read_only_sessions(table: &str) -> Option<(MySqlSession, MySqlSession)> {
+    let mut rw = session().await?;
+    run_all(
+        &mut rw,
+        &[
+            &format!("drop table if exists {table}"),
+            &format!("create table {table} (id int primary key)"),
+            &format!("insert into {table} values (1)"),
+        ],
+    )
+    .await;
+    let ro = connect(SslMode::Prefer, ConnectOptions { read_only: true }).await?;
+    Some((rw, ro))
+}
+
+#[tokio::test]
+async fn read_only_refuses_writes() {
+    let Some((mut rw, mut ro)) = read_only_sessions("idedb_read_only").await else { return };
+    testing::read_only_refuses_writes(&mut ro, "insert into idedb_read_only values (2)", "select id from idedb_read_only")
+        .await;
+    // Cancelling still works: the connection that sends `KILL QUERY` is
+    // read only too.
+    testing::cancels_a_running_statement(ro, "select sleep(30)").await;
+    run_all(&mut rw, &["drop table idedb_read_only"]).await;
+}
+
+/// The connection that replaces a lost one is read only too.
+#[tokio::test]
+async fn read_only_survives_reconnecting() {
+    let Some((mut rw, mut ro)) = read_only_sessions("idedb_read_only_reconnect").await else { return };
+    kill_connection(&mut ro).await;
+    let events = collect(&mut ro, "select 1", 10).await;
+    assert!(last_error(&events).0.contains("re-established"), "{events:?}");
+    testing::read_only_refuses_writes(
+        &mut ro,
+        "insert into idedb_read_only_reconnect values (2)",
+        "select id from idedb_read_only_reconnect",
+    )
+    .await;
+    run_all(&mut rw, &["drop table idedb_read_only_reconnect"]).await;
 }

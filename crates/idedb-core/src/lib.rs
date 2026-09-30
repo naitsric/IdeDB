@@ -12,7 +12,7 @@ mod session;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use connection::{ConnectionParams, Engine, ServerInfo, SslMode};
+pub use connection::{ConnectOptions, ConnectionParams, Engine, ServerInfo, SslMode};
 pub use edit::{ApplyOutcome, ColumnValue, ROW_NOT_FOUND, RowChange, TableRef};
 pub use fetch::{Fetch, Paged, Pager};
 pub use schema::{ColumnInfo, ForeignKey, ObjectKind, SchemaInfo, SchemaModel, TableInfo};

@@ -18,11 +18,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use idedb_core::{
-    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged, Pager,
-    QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, TableRef, Value,
+    ApplyOutcome, Canceller, Column, ConnectOptions, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged,
+    Pager, QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, TableRef,
+    Value,
 };
+use rusqlite::limits::Limit;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, ErrorCode, InterruptHandle, Rows};
+use rusqlite::{Connection, ErrorCode, InterruptHandle, OpenFlags, Rows};
 use tokio::sync::{mpsc, oneshot};
 
 /// How many VM instructions run between checks of the cancel flag.
@@ -118,14 +120,34 @@ impl Canceller for SqliteCanceller {
 impl SqliteSession {
     /// Opens `params.path`, creating the file if it does not exist. The
     /// password is ignored: SQLite files have none.
-    pub async fn connect(params: &ConnectionParams, _password: Option<&str>) -> Result<Self> {
+    pub async fn connect(params: &ConnectionParams, password: Option<&str>) -> Result<Self> {
+        Self::connect_with(params, password, ConnectOptions::default()).await
+    }
+
+    /// Like [`connect`](Self::connect), set up as `options` asks. Read only,
+    /// the path must be a plain one (not a `file:` URI) to a file that
+    /// already exists, and SQLite itself refuses to write to it or to attach
+    /// other files.
+    pub async fn connect_with(
+        params: &ConnectionParams,
+        _password: Option<&str>,
+        options: ConnectOptions,
+    ) -> Result<Self> {
         let path = params.path.trim().to_owned();
         if path.is_empty() {
             return Err(Error::InvalidParams("SQLite needs a database file path".into()));
         }
+        // The bundled SQLite reads any path starting with `file:` as a URI,
+        // whatever the open flags say, and a URI's `cache=shared` joins the
+        // cache of a read-write connection to the same file in this process,
+        // writes included.
+        if options.read_only && path.starts_with("file:") {
+            let message = "a read-only SQLite session needs a plain file path, not a file: URI";
+            return Err(Error::InvalidParams(message.into()));
+        }
 
         let opened = tokio::task::spawn_blocking(move || -> rusqlite::Result<_> {
-            let conn = Connection::open(&path)?;
+            let conn = if options.read_only { open_read_only(&path)? } else { Connection::open(&path)? };
             conn.busy_timeout(Duration::from_secs(5))?;
             conn.execute_batch("PRAGMA foreign_keys = ON")?;
             // Touch the file so a missing directory or a non-database file
@@ -512,6 +534,23 @@ fn value(v: ValueRef<'_>) -> Value {
         },
         ValueRef::Blob(bytes) => Value::Bytes(bytes.to_vec()),
     }
+}
+
+/// Opens `path` (a plain path, not a URI) so SQLite itself refuses every
+/// write to it: read only, and without `SQLITE_OPEN_CREATE`, so a missing
+/// file is an error rather than a new empty database. No other file can be
+/// attached, read-write or created: the limit of attached databases is zero,
+/// which also stops `VACUUM INTO`, as it attaches its target. Only the
+/// session's own `temp` database stays writable.
+///
+/// A database in WAL mode needs its `-wal` and `-shm` files even to be read,
+/// and SQLite creates them next to it when they are missing: opening one
+/// read only fails when they are missing and cannot be created (in a
+/// read-only directory, say).
+fn open_read_only(path: &str) -> rusqlite::Result<Connection> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    Ok(conn)
 }
 
 /// Quotes an identifier for interpolation into SQL.

@@ -6,12 +6,16 @@
 
 use idedb_core::testing::{self, collect, rows};
 use idedb_core::{
-    ApplyOutcome, ColumnInfo, ColumnValue, ConnectionParams, Engine, ForeignKey, ObjectKind, QueryEvent, RowChange,
-    Session, SslMode, TableRef, Value,
+    ApplyOutcome, ColumnInfo, ColumnValue, ConnectOptions, ConnectionParams, Engine, ForeignKey, ObjectKind, QueryEvent,
+    RowChange, Session, SslMode, TableRef, Value,
 };
 use idedb_driver_pg::PgSession;
 
 async fn session() -> Option<PgSession> {
+    session_with(ConnectOptions::default()).await
+}
+
+async fn session_with(options: ConnectOptions) -> Option<PgSession> {
     let Ok(url) = std::env::var("IDEDB_PG_URL") else {
         eprintln!("IDEDB_PG_URL not set, skipping");
         return None;
@@ -31,7 +35,7 @@ async fn session() -> Option<PgSession> {
         path: String::new(),
     };
     let password = config.get_password().map(|p| String::from_utf8_lossy(p).into_owned());
-    Some(PgSession::connect(&params, password.as_deref()).await.expect("connect"))
+    Some(PgSession::connect_with(&params, password.as_deref(), options).await.expect("connect"))
 }
 
 #[tokio::test]
@@ -558,4 +562,49 @@ async fn applies_values_of_any_type() {
     let ApplyOutcome::Failed { index: 0, message } = outcome else { panic!("{outcome:?}") };
     assert!(message.contains("invalid input syntax for type numeric"), "{message}");
     testing::assert_usable(&mut s).await;
+}
+
+const READ_ONLY: ConnectOptions = ConnectOptions { read_only: true };
+
+/// A read-only session, next to a read-write one that created `table` with
+/// one row for it to read.
+async fn read_only_sessions(table: &str) -> Option<(PgSession, PgSession)> {
+    let mut rw = session().await?;
+    run_all(
+        &mut rw,
+        &[
+            &format!("drop table if exists {table}"),
+            &format!("create table {table} (id int primary key)"),
+            &format!("insert into {table} values (1)"),
+        ],
+    )
+    .await;
+    let ro = session_with(READ_ONLY).await?;
+    Some((rw, ro))
+}
+
+#[tokio::test]
+async fn read_only_refuses_writes() {
+    let Some((mut rw, mut ro)) = read_only_sessions("idedb_read_only").await else { return };
+    testing::read_only_refuses_writes(&mut ro, "insert into idedb_read_only values (2)", "select id from idedb_read_only")
+        .await;
+    // The driver's own read transactions still work: a paged read, a paused one.
+    testing::fetches_on_demand(&mut ro, "select g from generate_series(1, 23) g", 23).await;
+    run_all(&mut rw, &["drop table idedb_read_only"]).await;
+}
+
+/// The connection that replaces a lost one is read only too.
+#[tokio::test]
+async fn read_only_survives_reconnecting() {
+    let Some((mut rw, mut ro)) = read_only_sessions("idedb_read_only_reconnect").await else { return };
+    terminate(&mut ro).await;
+    let events = collect(&mut ro, "select 1", 10).await;
+    assert!(last_error(&events).0.contains("re-established"), "{events:?}");
+    testing::read_only_refuses_writes(
+        &mut ro,
+        "insert into idedb_read_only_reconnect values (2)",
+        "select id from idedb_read_only_reconnect",
+    )
+    .await;
+    run_all(&mut rw, &["drop table idedb_read_only_reconnect"]).await;
 }

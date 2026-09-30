@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use idedb_core::{
-    ApplyOutcome, Canceller, Column, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged, Pager,
-    QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
+    ApplyOutcome, Canceller, Column, ConnectOptions, ConnectionParams, Engine, Error, Fetch, NO_OPEN_RESULT, Paged,
+    Pager, QueryEvent, Result, Row, RowChange, SchemaInfo, SchemaModel, ServerInfo, Session, SqlProblem, SslMode,
     TableRef,
 };
 use mysql_async::consts::StatusFlags;
@@ -49,6 +49,12 @@ const UNSUPPORTED_PS: u16 = 1295;
 /// `KILL QUERY` instead: cheaper than a second connection when little is
 /// left, bounded when a lot is.
 const DRAIN_BUDGET: usize = 10_000;
+/// Makes every transaction the session runs read only, for
+/// [`ConnectOptions::read_only`]. Run as an init command of the connection
+/// options, so every connection made from them gets it: the session's, the
+/// ones that replace it on reconnect, and the short-lived ones that send
+/// `KILL QUERY` (which read-only mode does not stop).
+const READ_ONLY: &str = "SET SESSION TRANSACTION READ ONLY";
 
 pub struct MySqlSession {
     conn: Conn,
@@ -164,6 +170,15 @@ impl CancelState {
 
 impl MySqlSession {
     pub async fn connect(params: &ConnectionParams, password: Option<&str>) -> Result<Self> {
+        Self::connect_with(params, password, ConnectOptions::default()).await
+    }
+
+    /// Like [`connect`](Self::connect), set up as `options` asks.
+    pub async fn connect_with(
+        params: &ConnectionParams,
+        password: Option<&str>,
+        options: ConnectOptions,
+    ) -> Result<Self> {
         let base = OptsBuilder::default()
             .ip_or_hostname(if params.host.is_empty() {
                 "localhost"
@@ -176,7 +191,8 @@ impl MySqlSession {
             .db_name((!params.database.is_empty()).then_some(params.database.as_str()))
             // Asking a local server for its unix socket would find the
             // container's path, not one on this host.
-            .prefer_socket(false);
+            .prefer_socket(false)
+            .init(if options.read_only { vec![READ_ONLY] } else { vec![] });
 
         // libpq semantics: prefer/require encrypt without verifying.
         let unverified = SslOpts::default()
@@ -251,7 +267,8 @@ impl MySqlSession {
         Ok(open)
     }
 
-    /// Replaces a connection that failed fatally, keeping the selected database.
+    /// Replaces a connection that failed fatally, keeping the selected
+    /// database. Read-only mode comes back with the options' init command.
     async fn reconnect(&mut self) -> Result<(), mysql_async::Error> {
         let opts = OptsBuilder::from_opts(self.opts.clone()).db_name(self.database.clone());
         let conn = Conn::new(opts).await?;

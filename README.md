@@ -1,178 +1,144 @@
-# IdeDB
+<p align="center">
+  <img src="design/icon.png" width="128" alt="IdeDB">
+</p>
 
-A SQL client for macOS with DataGrip-grade UX. Built with Tauri 2, React and a
-Rust core. Supports PostgreSQL, MySQL and SQLite.
+<h1 align="center">IdeDB</h1>
 
-## Requirements
+<p align="center">
+  <strong>A fast, native SQL IDE for macOS, built for the keyboard.</strong><br>
+  PostgreSQL · MySQL · SQLite
+</p>
 
-- macOS 13+, Xcode Command Line Tools
-- Rust (`rustup`), Node 22+ and pnpm
-- Docker, for the local databases used in development and tests
+<p align="center">
+  <a href="https://github.com/naitsric/IdeDB/actions/workflows/ci.yml"><img src="https://github.com/naitsric/IdeDB/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
 
-## Develop
+<!-- screenshot: docs/screenshot.png -->
+
+## Why IdeDB
+
+IdeDB brings DataGrip-style workflows to a small, native Mac app. It is a
+5 MB download, every action is a keystroke away, and it is careful
+with real data: it checks your SQL against the server without running it,
+never commits a transaction you opened, and asks before throwing away
+unsaved work.
+
+## Features
+
+### Connect
+- **PostgreSQL, MySQL and SQLite**, with the same experience on all three.
+- Paste a `postgres://` or `mysql://` URL and the connection form fills itself.
+- **Passwords live in the macOS Keychain**, never in IdeDB's own files; or
+  leave them unsaved and IdeDB asks once per session.
+- TLS modes Disable, Prefer, Require and Verify full, with libpq semantics.
+- Color-code data sources so production never looks like staging.
+
+### Explore
+- **Database Explorer** with schemas, tables, views and columns, primary and
+  foreign keys marked, loaded on demand.
+- **Speed search**: start typing in the tree to filter it.
+- **Go to Table** (⌘O) finds any table in any connected database; schemas load
+  in the background as soon as you connect.
+
+### Write SQL
+- A real code editor with dialect-aware highlighting, multiple cursors, search
+  and IntelliJ-style editing keys.
+- **Run the statement under the caret** with ⌘⏎, or a selection of several:
+  each gets its own result tab, and the run stops at the first error.
+- **Completion that knows your schema**: schemas, tables and columns, through
+  aliases, ranked above keywords where a table belongs.
+- **JOIN completion from foreign keys**: type `join` and get
+  `customers c on c.id = o.customer_id`.
+- **Live diagnostics**: the server checks your statements as you type without
+  executing them, so errors, unknown tables and columns are underlined before
+  you run anything.
+- **Go to Declaration** (⌘B) jumps from a name in the editor to the table or
+  column in the explorer. **Reformat** (⌥⌘L) tidies a statement or selection.
+- A schema selector per console, and a searchable **query history** with the
+  duration, row count or error of every run.
+
+### Work with results
+- A canvas-rendered grid, virtualized in both directions, that scrolls
+  smoothly through large results.
+- **Results load a page at a time** and fetch more as you scroll, so a huge
+  table never floods memory.
+- Value viewer for JSON and long text, and live count, sum, average, min and
+  max of the selected cells.
+- Copy as TSV, CSV, JSON or SQL INSERT; export results to CSV, JSON or SQL.
+- Pin result tabs to keep them while you run other queries.
+
+### Edit data
+- Open any table (F4) and filter it with WHERE and ORDER BY fields.
+- Edit cells, set NULL, add, duplicate and delete rows. Changes are marked until
+  you **Submit (⌘⏎), in a single transaction**: if one change fails, none are
+  applied and the failing row is highlighted.
+- **Go to Referenced Row** (⌘B) follows a foreign key to the row it points to.
+
+### Transactions you control
+- **Auto or Manual** transaction mode per console, with Commit (⌥⌘⏎) and
+  Rollback (⌥⇧⌘Z) and an indicator of how long a transaction has been open.
+- IdeDB never commits or rolls back a transaction you opened, and it asks
+  before closing a tab, disconnecting or quitting with one still open.
+- If a lost connection or an implicit commit ends a transaction, the console
+  tells you.
+
+### Feels like a Mac app
+- Native menu bar, translucent sidebar, light and dark themes following the
+  system, and a window that reopens where you left it.
+- A 9 MB app on the system's WebKit and a Rust core.
+
+## Keyboard
+
+| Action                          | Shortcut |
+| ------------------------------- | -------- |
+| Search Everywhere               | ⇧⇧       |
+| Find Action                     | ⇧⌘A      |
+| Go to Table                     | ⌘O       |
+| New Data Source                 | ⌘N       |
+| New Query Console               | ⇧⌘L      |
+| Execute statement / selection   | ⌘⏎       |
+| Cancel running statement        | ⌘F2      |
+| Query History                   | ⌥⌘E      |
+| Reformat Code                   | ⌥⌘L      |
+| Go to Declaration / Referenced Row | ⌘B    |
+| Open Table Data                 | F4       |
+| Submit data changes (in the grid) | ⌘⏎     |
+| Commit / Rollback               | ⌥⌘⏎ / ⌥⇧⌘Z |
+| Database Explorer               | ⌘1       |
+
+Every action is also in Find Action (⇧⌘A) and in the menu bar.
+
+## Install
+
+Download the latest `.dmg` from
+[Releases](https://github.com/naitsric/IdeDB/releases/latest) and drag IdeDB
+to Applications. Requires macOS 13 or later on Apple Silicon.
+
+Builds are not notarized yet, so macOS blocks the first launch. Run this once
+after installing:
 
 ```sh
-pnpm install
-pnpm db:up        # Postgres 17 on :54329 and MySQL 8.4 on :33069, user/password idedb/idedb
-pnpm app          # runs the app with hot reload
+xattr -dr com.apple.quarantine /Applications/IdeDB.app
 ```
 
-Both databases start with a sample `shop` schema (`dev/seed/`). In the app,
-create data sources by pasting these URLs into the URL field:
+## Roadmap
 
-```
-postgres://idedb:idedb@localhost:54329/idedb
-mysql://idedb:idedb@localhost:33069/shop
-```
+- SSH tunnels
+- Transposed grid view
+- Editable keymap
+- Prompts for `:named` query parameters
+- Notarized builds and automatic updates
 
-## Test
+## Contributing
 
-```sh
-pnpm test         # UI unit tests (statement splitting, editor, consoles)
-pnpm test:rust    # unit tests + driver conformance tests against the Docker databases
-pnpm typecheck
-```
+IdeDB is built with Tauri 2, React and Rust. See
+[CONTRIBUTING.md](CONTRIBUTING.md) to run it locally, run the tests and learn
+how the code is organized.
 
-## CI
+## License
 
-`.github/workflows/ci.yml` runs on every pull request and every push to
-`main`:
+To be decided.
 
-- **Frontend:** `tsc --noEmit`, `pnpm test`, `pnpm build`.
-- **Rust:** `cargo clippy --workspace --all-targets -- -D warnings` and
-  `pnpm test:rust` against Postgres 17 and MySQL 8.4 service containers
-  (same credentials and ports as `docker-compose.yml`). The job fails if the
-  database tests skip themselves.
+---
 
-CI runs on Linux only: while the repository is private, macOS runner minutes
-count 10x against the Actions quota. The Keychain integration is macOS-only
-and compiled out there.
-
-## Releasing
-
-Releases are cut by hand from `main` with the **Release** workflow, from
-Actions → Release → Run workflow, or:
-
-```sh
-gh workflow run release.yml -f bump=minor
-gh workflow run release.yml -f bump=patch -f dry_run=true   # build only
-```
-
-| Input     | Default   | Meaning                                                                 |
-| --------- | --------- | ----------------------------------------------------------------------- |
-| `bump`    | `patch`   | `patch`, `minor` or `major`                                             |
-| `target`  | `aarch64` | `aarch64` (Apple Silicon) or `universal` (adds Intel, builds longer)    |
-| `draft`   | `true`    | publish the GitHub Release as a draft                                   |
-| `dry_run` | `false`   | only build and attach the bundle to the workflow run: no commit, tag or release |
-
-The workflow bumps the version with `scripts/release-version.mjs`
-(`package.json` is the source of truth; `tauri.conf.json` reads it and the
-Cargo workspace version follows), commits `Release vX.Y.Z` to `main`, tags
-it, builds `IdeDB.app` and a `.dmg` on macOS, and publishes both in a GitHub
-Release with generated notes. If `main` is protected against direct pushes,
-allow `github-actions[bot]` to push or the prepare job will fail.
-
-**Code signing.** Until the Apple secrets exist, builds are ad-hoc signed and
-not notarized, so macOS blocks them after download; testers run
-`xattr -dr com.apple.quarantine /Applications/IdeDB.app` once. Signing turns
-on by itself when these repository secrets are set:
-
-- `APPLE_CERTIFICATE` (base64 of the Developer ID Application `.p12`),
-  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`: signing.
-- `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID`:
-  notarization.
-
-A release build uses the macOS runner for roughly 10–20 minutes (`universal`
-takes longer), which counts 10x while the repository is private. Auto-updates
-are not wired yet: release assets of a private repository cannot be
-downloaded without authentication.
-
-## macOS integration
-
-- **Menu bar:** built from the command registry (`src/menu/`): every command
-  appears under a menu picked by its category, unknown categories under Tools.
-  A menu item shows its shortcut only when the key means the same thing
-  everywhere; context keys (⌘⏎, ⌘B, ⌘N in the grid…) stay with the JS keymap,
-  because AppKit gives menu shortcuts priority over the web view.
-- **Translucent sidebar:** the window is transparent over the sidebar material,
-  and only the explorer and title bar let it through. This uses Tauri's
-  `macos-private-api`, which the Mac App Store does not accept; IdeDB ships
-  through GitHub Releases. "Toggle Translucent Sidebar" makes everything opaque.
-- **App icon:** `design/icon.svg` is the source. After editing it, run
-  `pnpm icon` to render it and regenerate `src-tauri/icons`.
-
-## Transactions
-
-Each console has a transaction mode, like DataGrip's **Tx: Auto / Manual**
-(toolbar toggle, or "Toggle Manual Transaction Mode"; remembered per console):
-
-- **Auto:** every statement commits on its own, unless you type `BEGIN`.
-- **Manual:** the first statement opens a transaction (`BEGIN`, or
-  `START TRANSACTION` on MySQL) and everything after it, data editor submits
-  included, stays uncommitted until you commit or roll back.
-
-While a transaction is open the console shows how long it has been open and
-how many statements ran in it; the status bar shows it for the active console.
-
-| Action   | Shortcut |
-|----------|----------|
-| Commit   | ⌥⌘⏎      |
-| Rollback | ⌥⇧⌘Z     |
-
-Closing a console tab, disconnecting or deleting its data source, and quitting
-or closing the window with a transaction open first ask whether to commit or
-roll back, or cancel. The Dock's Quit and system logout end the app without
-asking (macOS gives apps no way to stop them), and an uncommitted transaction
-is then rolled back by the server. If a transaction ends on its own (lost
-connection, an implicit commit by DDL, PostgreSQL rolling back a failed one
-on COMMIT), the console says so.
-
-## Layout
-
-```
-.github/workflows/   CI (Linux) and the manual Release workflow (macOS)
-scripts/             release-version.mjs (version bump), render-icon.mjs (app icon)
-design/              app icon source (icon.svg) and its 1024px render
-src/                 React UI
-  commands/          command registry, keymap, app commands, Search Everywhere
-  menu/              native menu bar model, built from the command registry
-  actions.ts         user-level actions shared by commands, menus and search
-  workbench/         window chrome, dockable panels (explorer, consoles, result tabs)
-  editor/            SQL editor (CodeMirror 6): statement splitting, completion (with
-                     FK joins), live diagnostics, go to declaration, formatting
-  explorer/          Database Explorer tree
-  dialogs/           data source and password dialogs
-  grid/              result grid (Glide Data Grid behind our own props) and the data
-                     editor: filters, pending changes, copy/export, value viewer
-  db/                typed IPC with the Rust core, data source and console state
-src-tauri/           Tauri app: commands exposed to the UI, driver dispatch
-crates/
-  idedb-core/           engine-agnostic types, the Session trait, conformance tests
-  idedb-driver-pg/      PostgreSQL (tokio-postgres)
-  idedb-driver-mysql/   MySQL (mysql_async)
-  idedb-driver-sqlite/  SQLite (rusqlite, bundled)
-  idedb-store/          data sources and query history (local SQLite), passwords (Keychain)
-```
-
-Every driver implements `idedb_core::Session` and runs the shared conformance
-checks in `idedb_core::testing` (paging, cancellation, errors, data editor
-changes, checking without running), so all engines behave the same behind the UI.
-
-Results load a page at a time, as in DataGrip: a statement reads its first
-page (500 rows by default; *Result Page Size…* changes it) and the rest stays
-open on the console's session. Scrolling near the end fetches the next page,
-*Fetch All Rows* the rest, and *Close Result Set* releases it. A session holds
-one open result; anything else it runs (another statement, a data editor
-submit, a schema switch) closes it first, and so does two minutes without
-reading, because an open result holds server resources (a snapshot and table
-locks in Postgres, a statement paused mid-send in MySQL, a shared lock on a
-SQLite file). The driver's own read transaction never shows as the user's.
-
-Live diagnostics come from the engine itself: shortly after typing stops, the
-statements on screen are prepared (never executed) on the data source's
-explorer session, so the editor flags exactly what the server would reject,
-names and types included, without a SQL parser of our own.
-
-Every user action is a registered command (`src/commands/registry.ts`) with
-an id, a title and optionally a keybinding. Registering it is enough for it to
-show up in Search Everywhere (⇧⇧ / ⌘⇧A) and the keymap.
+<sub>DataGrip is a trademark of JetBrains s.r.o. IdeDB is an independent project and is not affiliated with or endorsed by JetBrains.</sub>

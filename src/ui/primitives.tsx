@@ -1,7 +1,14 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { twMerge } from "tailwind-merge";
 import { formatKeybinding } from "../commands/keymap";
 
-const cx = (...classes: (string | false | undefined)[]) => classes.filter(Boolean).join(" ");
+/**
+ * Joins class names; on conflicting Tailwind utilities the later one wins
+ * (`cx(inputClass, "w-20")` really is 5rem wide). A plain join would leave
+ * both classes and let stylesheet order decide, which differs between dev
+ * and production builds.
+ */
+const cx = (...classes: (string | false | null | undefined)[]) => twMerge(classes.filter(Boolean).join(" "));
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 

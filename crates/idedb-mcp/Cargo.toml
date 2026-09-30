@@ -1,0 +1,31 @@
+[package]
+name = "idedb-mcp"
+description = "Core of IdeDB's MCP server: tools, grants, approvals, pooled sessions and the audit log, without a transport"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# `idedb_mcp::testing`: a Host for tests, here and in the transport's tests.
+testing = []
+
+[dependencies]
+base64.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+getrandom.workspace = true
+idedb-core.workspace = true
+idedb-drivers.workspace = true
+idedb-sql.workspace = true
+idedb-store.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+# Itself with `testing`, for the integration tests in tests/.
+idedb-mcp = { path = ".", features = ["testing"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

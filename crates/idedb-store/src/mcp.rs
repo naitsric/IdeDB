@@ -5,7 +5,7 @@
 //! Timestamps are UTC, RFC 3339 with milliseconds, like query history.
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef};
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use crate::{Result, Store};
@@ -13,8 +13,13 @@ use crate::{Result, Store};
 /// Audit rows kept; older ones are pruned on insert.
 const AUDIT_RETENTION: usize = 20_000;
 
-/// Longer SQL is cut, on a char boundary, before it is audited.
-const AUDIT_MAX_SQL_BYTES: usize = 100 * 1024;
+// Longest text an audit row keeps per field, in bytes. Longer values are cut
+// on a char boundary; only cut SQL is flagged (`sql_truncated`).
+const MAX_SQL: usize = 100 * 1024;
+const MAX_ERROR: usize = 16 * 1024;
+const MAX_REASON: usize = 4 * 1024;
+/// Every other field: names, versions, ids, keys.
+const MAX_SHORT: usize = 256;
 
 /// What a client may do on a data source. Writes also need the user's
 /// approval each time, and none happen on a never-write data source.
@@ -121,6 +126,9 @@ text_enum!(Transport { Http => "http", Bridge => "bridge" });
 
 /// One tool call, as [`Store::mcp_add_audit`] records it. Client and data
 /// source names are copied so the row outlives both.
+///
+/// Text is capped when stored: `sql` at 100 KiB, `error` at 16 KiB,
+/// `reason` at 4 KiB and every other field at 256 bytes.
 #[derive(Debug, Clone, Copy)]
 pub struct NewAuditEntry<'a> {
     pub client_id: Option<&'a str>,
@@ -135,7 +143,6 @@ pub struct NewAuditEntry<'a> {
     pub tool: &'a str,
     pub data_source_id: Option<&'a str>,
     pub data_source_name: Option<&'a str>,
-    /// Cut to 100 KB when stored.
     pub sql: Option<&'a str>,
     pub statement_kind: Option<&'a str>,
     /// Why the client says it runs the statement.
@@ -167,6 +174,8 @@ pub struct AuditEntry {
     pub data_source_id: Option<String>,
     pub data_source_name: Option<String>,
     pub sql: Option<String>,
+    /// The SQL was longer and is cut to its first 100 KiB.
+    pub sql_truncated: bool,
     pub statement_kind: Option<String>,
     pub reason: Option<String>,
     pub decision: Decision,
@@ -202,8 +211,8 @@ const CLIENT_COLUMNS: &str =
     "id, name, token_prefix, created_at, last_seen_at, last_client_name, last_client_version, revoked_at";
 
 const AUDIT_COLUMNS: &str = "id, at, client_id, client_name, client_info_name, client_info_version, \
-    protocol_version, transport, session_key, tool, data_source_id, data_source_name, sql, statement_kind, \
-    reason, decision, approval_wait_ms, elapsed_ms, row_count, truncated, error";
+    protocol_version, transport, session_key, tool, data_source_id, data_source_name, sql, sql_truncated, \
+    statement_kind, reason, decision, approval_wait_ms, elapsed_ms, row_count, truncated, error";
 
 impl Store {
     /// Revoked ones included, oldest first.
@@ -259,14 +268,18 @@ impl Store {
         client_by_id(&db, id)
     }
 
-    /// Replaces the token; the old one stops authenticating at once. A
-    /// revoked client stays revoked. None if there is no such client.
+    /// Replaces the token; the old one stops authenticating at once. None,
+    /// and nothing changed, if there is no such client or it is revoked: a
+    /// revoked client gets no new token.
     pub fn mcp_client_rotate(&self, id: &str, token_hash: &[u8; 32], token_prefix: &str) -> Result<Option<McpClient>> {
         let db = self.db.lock().unwrap();
-        db.execute(
-            "update mcp_client set token_hash = ?2, token_prefix = ?3 where id = ?1",
+        let rotated = db.execute(
+            "update mcp_client set token_hash = ?2, token_prefix = ?3 where id = ?1 and revoked_at is null",
             params![id, token_hash, token_prefix],
         )?;
+        if rotated == 0 {
+            return Ok(None);
+        }
         client_by_id(&db, id)
     }
 
@@ -294,23 +307,32 @@ impl Store {
         Ok(())
     }
 
-    /// Replaces all of the client's grants at once. A data source listed
-    /// twice keeps the last access. Ids are not checked.
-    pub fn mcp_set_grants(&self, client_id: &str, grants: &[Grant]) -> Result<()> {
+    /// Replaces all of the client's grants at once and returns the client
+    /// with the grants kept, or None, and nothing changed, if there is no
+    /// such client. Grants on data sources that do not exist (any more) are
+    /// dropped; a data source listed twice keeps the last access.
+    pub fn mcp_set_grants(&self, client_id: &str, grants: &[Grant]) -> Result<Option<McpClient>> {
         let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
+        // Takes the write lock first, so what is checked here still holds
+        // when the grants are written, whatever another process does.
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if client_by_id(&tx, client_id)?.is_none() {
+            return Ok(None);
+        }
         tx.execute("delete from mcp_grant where client_id = ?1", [client_id])?;
         {
             let mut insert = tx.prepare(
-                "insert into mcp_grant (client_id, data_source_id, access) values (?1, ?2, ?3)
+                "insert into mcp_grant (client_id, data_source_id, access)
+                 select ?1, ?2, ?3 where exists (select 1 from data_source where id = ?2)
                  on conflict (client_id, data_source_id) do update set access = excluded.access",
             )?;
             for grant in grants {
                 insert.execute(params![client_id, grant.data_source_id, grant.access])?;
             }
         }
+        let client = client_by_id(&tx, client_id)?;
         tx.commit()?;
-        Ok(())
+        Ok(client)
     }
 
     /// Whether writes on the data source are refused without asking,
@@ -325,13 +347,16 @@ impl Store {
         Ok(never_write.unwrap_or(false))
     }
 
-    pub fn mcp_set_never_write(&self, data_source_id: &str, never_write: bool) -> Result<()> {
-        self.db.lock().unwrap().execute(
-            "insert into mcp_data_source (data_source_id, never_write) values (?1, ?2)
+    /// False, and nothing stored, if there is no such data source: a policy
+    /// never outlives its data source.
+    pub fn mcp_set_never_write(&self, data_source_id: &str, never_write: bool) -> Result<bool> {
+        let stored = self.db.lock().unwrap().execute(
+            "insert into mcp_data_source (data_source_id, never_write)
+             select ?1, ?2 where exists (select 1 from data_source where id = ?1)
              on conflict (data_source_id) do update set never_write = excluded.never_write",
             params![data_source_id, never_write],
         )?;
-        Ok(())
+        Ok(stored > 0)
     }
 
     /// Records a tool call, stamped now, and returns it as stored.
@@ -340,44 +365,45 @@ impl Store {
     }
 
     fn mcp_add_audit_retaining(&self, entry: NewAuditEntry, keep: usize) -> Result<AuditEntry> {
-        let sql = entry.sql.map(|sql| &sql[..sql.floor_char_boundary(AUDIT_MAX_SQL_BYTES)]);
+        fn short(text: &str) -> &str {
+            cut(text, MAX_SHORT)
+        }
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         tx.execute(
             "insert into mcp_audit (at, client_id, client_name, client_info_name, client_info_version,
                protocol_version, transport, session_key, tool, data_source_id, data_source_name, sql,
-               statement_kind, reason, decision, approval_wait_ms, elapsed_ms, row_count, truncated, error)
+               sql_truncated, statement_kind, reason, decision, approval_wait_ms, elapsed_ms, row_count,
+               truncated, error)
              values (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-               ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+               ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
-                entry.client_id,
-                entry.client_name,
-                entry.client_info_name,
-                entry.client_info_version,
-                entry.protocol_version,
+                entry.client_id.map(short),
+                short(entry.client_name),
+                entry.client_info_name.map(short),
+                entry.client_info_version.map(short),
+                entry.protocol_version.map(short),
                 entry.transport,
-                entry.session_key,
-                entry.tool,
-                entry.data_source_id,
-                entry.data_source_name,
-                sql,
-                entry.statement_kind,
-                entry.reason,
+                entry.session_key.map(short),
+                short(entry.tool),
+                entry.data_source_id.map(short),
+                entry.data_source_name.map(short),
+                entry.sql.map(|sql| cut(sql, MAX_SQL)),
+                entry.sql.is_some_and(|sql| sql.len() > MAX_SQL),
+                entry.statement_kind.map(short),
+                entry.reason.map(|reason| cut(reason, MAX_REASON)),
                 entry.decision,
                 entry.approval_wait_ms.map(|n| n as i64),
                 entry.elapsed_ms.map(|n| n as i64),
                 entry.row_count.map(|n| n as i64),
                 entry.truncated,
-                entry.error,
+                entry.error.map(|error| cut(error, MAX_ERROR)),
             ],
         )?;
         let id = tx.last_insert_rowid();
-        // Ids grow with insertion, so everything below the `keep`-th newest
-        // id is older than what is retained.
-        tx.execute(
-            "delete from mcp_audit where id < (select id from mcp_audit order by id desc limit 1 offset ?1)",
-            [keep as i64 - 1],
-        )?;
+        // Rows only ever go from the oldest end, so ids are consecutive and
+        // the newest `keep` rows are exactly those above `id - keep`.
+        tx.execute("delete from mcp_audit where id <= ?1", [id - keep as i64])?;
         let stored = tx.query_row(&format!("select {AUDIT_COLUMNS} from mcp_audit where id = ?1"), [id], audit_row)?;
         tx.commit()?;
         Ok(stored)
@@ -433,6 +459,11 @@ pub(crate) fn forget_data_source(db: &Connection, data_source_id: &str) -> Resul
     Ok(())
 }
 
+/// `text` cut to at most `max` bytes, on a char boundary.
+fn cut(text: &str, max: usize) -> &str {
+    &text[..text.floor_char_boundary(max)]
+}
+
 fn client_by_id(db: &Connection, id: &str) -> Result<Option<McpClient>> {
     let client =
         db.query_row(&format!("select {CLIENT_COLUMNS} from mcp_client where id = ?1"), [id], client_row).optional()?;
@@ -478,14 +509,15 @@ fn audit_row(row: &Row) -> rusqlite::Result<AuditEntry> {
         data_source_id: row.get(10)?,
         data_source_name: row.get(11)?,
         sql: row.get(12)?,
-        statement_kind: row.get(13)?,
-        reason: row.get(14)?,
-        decision: row.get(15)?,
-        approval_wait_ms: count(16)?,
-        elapsed_ms: count(17)?,
-        row_count: count(18)?,
-        truncated: row.get(19)?,
-        error: row.get(20)?,
+        sql_truncated: row.get(13)?,
+        statement_kind: row.get(14)?,
+        reason: row.get(15)?,
+        decision: row.get(16)?,
+        approval_wait_ms: count(17)?,
+        elapsed_ms: count(18)?,
+        row_count: count(19)?,
+        truncated: row.get(20)?,
+        error: row.get(21)?,
     })
 }
 
@@ -551,6 +583,11 @@ mod tests {
             color: None,
             save_password: false,
         }
+    }
+
+    /// Saves a data source; grants and policy only apply to existing ones.
+    fn saved(store: &Store, name: &str) -> String {
+        store.save(sqlite_source(name)).unwrap().id
     }
 
     #[test]
@@ -625,8 +662,10 @@ mod tests {
         assert_eq!(renamed, McpClient { name: "claude".into(), ..a.clone() });
         assert_eq!(store.mcp_client_rename("missing", "x").unwrap(), None);
 
-        store.mcp_set_grants(&a.id, &[grant("ds", Access::Write)]).unwrap();
-        store.mcp_add_audit(entry(&a.id, "ds", "select 1")).unwrap();
+        let ds = saved(&store, "shop");
+        let with_grant = store.mcp_set_grants(&a.id, &[grant(&ds, Access::Write)]).unwrap().unwrap();
+        assert_eq!(with_grant.grants, [grant(&ds, Access::Write)]);
+        store.mcp_add_audit(entry(&a.id, &ds, "select 1")).unwrap();
         store.mcp_client_delete(&a.id).unwrap();
         assert_eq!(store.mcp_clients().unwrap(), [b]);
         assert_eq!(store.mcp_client_by_token_hash(&hash(1)).unwrap(), None);
@@ -640,10 +679,11 @@ mod tests {
     fn a_revoked_token_is_not_found() {
         let store = Store::in_memory().unwrap();
         let client = store.mcp_client_create("claude-code", &hash(1), "idedb_aa").unwrap();
-        store.mcp_set_grants(&client.id, &[grant("ds", Access::Read)]).unwrap();
+        let ds = saved(&store, "shop");
+        store.mcp_set_grants(&client.id, &[grant(&ds, Access::Read)]).unwrap();
         let found = store.mcp_client_by_token_hash(&hash(1)).unwrap().unwrap();
         assert_eq!(found.id, client.id);
-        assert_eq!(found.grants, [grant("ds", Access::Read)]);
+        assert_eq!(found.grants, [grant(&ds, Access::Read)]);
         assert_eq!(store.mcp_client_by_token_hash(&hash(9)).unwrap(), None);
 
         let revoked = store.mcp_client_revoke(&client.id).unwrap().unwrap();
@@ -672,11 +712,14 @@ mod tests {
         assert!(store.mcp_client_rotate(&other.id, &hash(2), "idedb_bb").is_err());
         assert!(store.mcp_client_create("dup", &hash(2), "idedb_bb").is_err());
 
-        // Rotating a revoked client does not bring it back.
-        store.mcp_client_revoke(&other.id).unwrap();
-        let still_revoked = store.mcp_client_rotate(&other.id, &hash(5), "idedb_ee").unwrap().unwrap();
-        assert!(still_revoked.revoked_at.is_some());
+        // A revoked client gets no new token, and keeps its old prefix.
+        let revoked = store.mcp_client_revoke(&other.id).unwrap().unwrap();
+        assert_eq!(store.mcp_client_rotate(&other.id, &hash(5), "idedb_ee").unwrap(), None);
+        assert_eq!(store.mcp_clients().unwrap()[1], revoked);
+        assert_eq!(revoked.token_prefix, "idedb_dd");
         assert_eq!(store.mcp_client_by_token_hash(&hash(5)).unwrap(), None);
+        // Nor did the new hash take a place: another client can still use it.
+        store.mcp_client_create("fresh", &hash(5), "idedb_ee").unwrap();
     }
 
     #[test]
@@ -703,32 +746,67 @@ mod tests {
     #[test]
     fn grants_are_replaced_not_appended() {
         let store = Store::in_memory().unwrap();
+        let (pg, my, lite) = (saved(&store, "pg"), saved(&store, "my"), saved(&store, "lite"));
         let a = store.mcp_client_create("a", &hash(1), "idedb_aa").unwrap();
         let b = store.mcp_client_create("b", &hash(2), "idedb_bb").unwrap();
-        store.mcp_set_grants(&a.id, &[grant("pg", Access::Read), grant("lite", Access::Write)]).unwrap();
-        store.mcp_set_grants(&b.id, &[grant("pg", Access::Write)]).unwrap();
+        store.mcp_set_grants(&a.id, &[grant(&pg, Access::Read), grant(&lite, Access::Write)]).unwrap();
+        store.mcp_set_grants(&b.id, &[grant(&pg, Access::Write)]).unwrap();
 
-        let replacement = [grant("pg", Access::Write), grant("my", Access::Read), grant("my", Access::Write)];
-        store.mcp_set_grants(&a.id, &replacement).unwrap();
+        let replacement = [grant(&pg, Access::Write), grant(&my, Access::Read), grant(&my, Access::Write)];
+        let replaced = store.mcp_set_grants(&a.id, &replacement).unwrap().unwrap();
+        let mut expected = vec![grant(&my, Access::Write), grant(&pg, Access::Write)];
+        expected.sort_by(|x, y| x.data_source_id.cmp(&y.data_source_id));
+        assert_eq!(replaced.grants, expected);
         let clients = store.mcp_clients().unwrap();
-        assert_eq!(clients[0].grants, [grant("my", Access::Write), grant("pg", Access::Write)]);
-        assert_eq!(clients[1].grants, [grant("pg", Access::Write)]);
+        assert_eq!(clients[0].grants, expected);
+        assert_eq!(clients[1].grants, [grant(&pg, Access::Write)]);
 
         store.mcp_set_grants(&a.id, &[]).unwrap();
         let clients = store.mcp_clients().unwrap();
         assert!(clients[0].grants.is_empty());
-        assert_eq!(clients[1].grants, [grant("pg", Access::Write)]);
+        assert_eq!(clients[1].grants, [grant(&pg, Access::Write)]);
+    }
+
+    #[test]
+    fn grants_need_an_existing_client_and_data_source() {
+        let store = Store::in_memory().unwrap();
+        let pg = saved(&store, "pg");
+        let client = store.mcp_client_create("a", &hash(1), "idedb_aa").unwrap();
+
+        // Grants on unknown data sources are dropped, the rest kept.
+        let set = store.mcp_set_grants(&client.id, &[grant("missing", Access::Write), grant(&pg, Access::Read)]);
+        assert_eq!(set.unwrap().unwrap().grants, [grant(&pg, Access::Read)]);
+
+        // An unknown client gets nothing, and nothing else changes.
+        assert_eq!(store.mcp_set_grants("missing", &[grant(&pg, Access::Write)]).unwrap(), None);
+        assert_eq!(count(&store, "select count(*) from mcp_grant where client_id = ?1", "missing"), 0);
+        assert_eq!(store.mcp_clients().unwrap()[0].grants, [grant(&pg, Access::Read)]);
+
+        // After its client is deleted, no grant comes back for it.
+        store.mcp_client_delete(&client.id).unwrap();
+        assert_eq!(store.mcp_set_grants(&client.id, &[grant(&pg, Access::Read)]).unwrap(), None);
+        assert_eq!(count(&store, "select count(*) from mcp_grant where client_id = ?1", &client.id), 0);
     }
 
     #[test]
     fn never_write_defaults_to_false() {
         let store = Store::in_memory().unwrap();
-        assert!(!store.mcp_never_write("ds").unwrap());
-        store.mcp_set_never_write("ds", true).unwrap();
-        assert!(store.mcp_never_write("ds").unwrap());
-        assert!(!store.mcp_never_write("other").unwrap());
-        store.mcp_set_never_write("ds", false).unwrap();
-        assert!(!store.mcp_never_write("ds").unwrap());
+        let ds = saved(&store, "shop");
+        let other = saved(&store, "other");
+        assert!(!store.mcp_never_write(&ds).unwrap());
+        assert!(store.mcp_set_never_write(&ds, true).unwrap());
+        assert!(store.mcp_never_write(&ds).unwrap());
+        assert!(!store.mcp_never_write(&other).unwrap());
+        assert!(store.mcp_set_never_write(&ds, false).unwrap());
+        assert!(!store.mcp_never_write(&ds).unwrap());
+    }
+
+    #[test]
+    fn never_write_on_an_unknown_data_source_stores_nothing() {
+        let store = Store::in_memory().unwrap();
+        assert!(!store.mcp_set_never_write("missing", true).unwrap());
+        assert!(!store.mcp_never_write("missing").unwrap());
+        assert_eq!(count(&store, "select count(*) from mcp_data_source where data_source_id = ?1", "missing"), 0);
     }
 
     #[test]
@@ -740,7 +818,8 @@ mod tests {
         store.mcp_set_grants(&client.id, &[grant(&gone.id, Access::Write), grant(&kept.id, Access::Read)]).unwrap();
         store.mcp_set_never_write(&gone.id, true).unwrap();
         store.mcp_set_never_write(&kept.id, true).unwrap();
-        store.mcp_add_audit(entry(&client.id, &gone.id, "select 1")).unwrap();
+        let audited = NewAuditEntry { data_source_name: Some(&gone.name), ..entry(&client.id, &gone.id, "select 1") };
+        store.mcp_add_audit(audited).unwrap();
 
         store.delete(&gone.id).unwrap();
 
@@ -749,10 +828,18 @@ mod tests {
         assert_eq!(count(&store, "select count(*) from mcp_data_source where data_source_id = ?1", &gone.id), 0);
         assert!(store.mcp_never_write(&kept.id).unwrap());
 
+        // Its audit rows stay, under the name it had.
         let filter = AuditFilter { data_source_id: Some(gone.id.clone()), ..Default::default() };
         let audit = store.mcp_audit(&filter).unwrap();
         assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].data_source_name.as_deref(), Some("shop"));
+        assert_eq!(audit[0].data_source_name.as_deref(), Some("gone"));
+
+        // A late write for the deleted data source brings nothing back.
+        let all = [grant(&gone.id, Access::Write), grant(&kept.id, Access::Read)];
+        assert_eq!(store.mcp_set_grants(&client.id, &all).unwrap().unwrap().grants, [grant(&kept.id, Access::Read)]);
+        assert!(!store.mcp_set_never_write(&gone.id, true).unwrap());
+        assert_eq!(count(&store, "select count(*) from mcp_grant where data_source_id = ?1", &gone.id), 0);
+        assert_eq!(count(&store, "select count(*) from mcp_data_source where data_source_id = ?1", &gone.id), 0);
     }
 
     #[test]
@@ -801,6 +888,7 @@ mod tests {
                 data_source_id: Some("ds".into()),
                 data_source_name: Some("shop".into()),
                 sql: Some("update t set x = 1".into()),
+                sql_truncated: false,
                 statement_kind: Some("update".into()),
                 reason: Some("fix a typo".into()),
                 decision: Decision::Approved,
@@ -817,6 +905,7 @@ mod tests {
         assert_eq!(json["decision"], "approved");
         assert_eq!(json["transport"], "bridge");
         assert_eq!(json["approvalWaitMs"], 1500);
+        assert_eq!(json["sqlTruncated"], false);
     }
 
     #[test]
@@ -829,6 +918,15 @@ mod tests {
 
         // Retention is global, not per client or data source.
         assert_eq!(sqls(&store.mcp_audit(&AuditFilter::default()).unwrap()), ["select b", "select 4", "select 3"]);
+
+        // Exactly `keep` rows stay however many go in, down to one.
+        for i in 0..40 {
+            store.mcp_add_audit_retaining(entry("a", "ds", &format!("select {i}")), 7).unwrap();
+        }
+        let kept = store.mcp_audit(&AuditFilter::default()).unwrap();
+        assert_eq!(sqls(&kept), (33..40).rev().map(|i| format!("select {i}")).collect::<Vec<_>>());
+        store.mcp_add_audit_retaining(entry("a", "ds", "select last"), 1).unwrap();
+        assert_eq!(sqls(&store.mcp_audit(&AuditFilter::default()).unwrap()), ["select last"]);
     }
 
     #[test]
@@ -894,18 +992,68 @@ mod tests {
     }
 
     #[test]
-    fn cuts_long_sql_on_a_char_boundary() {
+    fn cuts_long_sql_on_a_char_boundary_and_flags_it() {
         let store = Store::in_memory().unwrap();
         // 9 bytes, then 2-byte chars: the limit (even) falls inside one.
-        let long = format!("select 'x{}'", "é".repeat(AUDIT_MAX_SQL_BYTES));
-        assert!(!long.is_char_boundary(AUDIT_MAX_SQL_BYTES));
-        let stored = store.mcp_add_audit(entry("a", "ds", &long)).unwrap().sql.unwrap();
-        assert_eq!(stored.len(), AUDIT_MAX_SQL_BYTES - 1);
-        assert!(long.starts_with(&stored));
+        let long = format!("select 'x{}'", "é".repeat(MAX_SQL));
+        assert!(!long.is_char_boundary(MAX_SQL));
+        let stored = store.mcp_add_audit(entry("a", "ds", &long)).unwrap();
+        let sql = stored.sql.unwrap();
+        assert_eq!(sql.len(), MAX_SQL - 1);
+        assert!(long.starts_with(&sql));
+        assert!(stored.sql_truncated);
 
         let short = "select 'é'";
-        assert_eq!(store.mcp_add_audit(entry("a", "ds", short)).unwrap().sql.as_deref(), Some(short));
-        let exact = "x".repeat(AUDIT_MAX_SQL_BYTES);
-        assert_eq!(store.mcp_add_audit(entry("a", "ds", &exact)).unwrap().sql, Some(exact));
+        let stored = store.mcp_add_audit(entry("a", "ds", short)).unwrap();
+        assert_eq!((stored.sql.as_deref(), stored.sql_truncated), (Some(short), false));
+        let exact = "x".repeat(MAX_SQL);
+        let stored = store.mcp_add_audit(entry("a", "ds", &exact)).unwrap();
+        assert_eq!((stored.sql, stored.sql_truncated), (Some(exact), false));
+        let stored = store.mcp_add_audit(NewAuditEntry { sql: None, ..entry("a", "ds", "") }).unwrap();
+        assert_eq!((stored.sql, stored.sql_truncated), (None, false));
+    }
+
+    #[test]
+    fn caps_every_other_text_field() {
+        let store = Store::in_memory().unwrap();
+        // One byte, then 2-byte chars, so each (even) limit falls inside one.
+        let long = |max: usize| format!("x{}", "é".repeat(max));
+        let (short, reason, error) = (long(MAX_SHORT), long(MAX_REASON), long(MAX_ERROR));
+        let stored = store
+            .mcp_add_audit(NewAuditEntry {
+                client_id: Some(&short),
+                client_name: &short,
+                client_info_name: Some(&short),
+                client_info_version: Some(&short),
+                protocol_version: Some(&short),
+                session_key: Some(&short),
+                tool: &short,
+                data_source_id: Some(&short),
+                data_source_name: Some(&short),
+                statement_kind: Some(&short),
+                reason: Some(&reason),
+                error: Some(&error),
+                ..entry("a", "ds", "select 1")
+            })
+            .unwrap();
+
+        let cut_short = &short[..MAX_SHORT - 1];
+        for field in [
+            stored.client_id.as_deref(),
+            Some(stored.client_name.as_str()),
+            stored.client_info_name.as_deref(),
+            stored.client_info_version.as_deref(),
+            stored.protocol_version.as_deref(),
+            stored.session_key.as_deref(),
+            Some(stored.tool.as_str()),
+            stored.data_source_id.as_deref(),
+            stored.data_source_name.as_deref(),
+            stored.statement_kind.as_deref(),
+        ] {
+            assert_eq!(field, Some(cut_short));
+        }
+        assert_eq!(stored.reason.as_deref(), Some(&reason[..MAX_REASON - 1]));
+        assert_eq!(stored.error.as_deref(), Some(&error[..MAX_ERROR - 1]));
+        assert!(!stored.sql_truncated);
     }
 }

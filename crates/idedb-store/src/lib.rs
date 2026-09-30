@@ -23,7 +23,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use idedb_core::ConnectionParams;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -114,6 +114,7 @@ const MIGRATIONS: &[&str] = &[
         data_source_id text,
         data_source_name text,
         sql text,
+        sql_truncated integer not null default 0,
         statement_kind text,
         reason text,
         decision text not null
@@ -199,15 +200,25 @@ impl Store {
 
 /// Runs the migrations past `user_version`, each one and its version bump in
 /// one transaction, so a failing migration leaves the store as it was.
+///
+/// Another process may be opening the same store: each transaction takes
+/// the write lock up front (waiting out the other one, up to rusqlite's
+/// busy timeout) and re-reads the version under it, so no migration runs
+/// twice.
 fn migrate(db: &mut Connection, migrations: &[&str]) -> Result<()> {
-    let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    for (i, migration) in migrations.iter().enumerate().skip(version as usize) {
-        let tx = db.transaction()?;
+    let user_version = |db: &Connection| db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0));
+    // Up to date, the common case: no need for the write lock.
+    if user_version(db)? as usize >= migrations.len() {
+        return Ok(());
+    }
+    loop {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version = user_version(&tx)?;
+        let Some(migration) = migrations.get(version as usize) else { return Ok(()) };
         tx.execute_batch(migration)?;
-        tx.pragma_update(None, "user_version", i as i64 + 1)?;
+        tx.pragma_update(None, "user_version", version + 1)?;
         tx.commit()?;
     }
-    Ok(())
 }
 
 fn read_row(row: &rusqlite::Row) -> rusqlite::Result<Result<DataSource>> {
@@ -263,6 +274,33 @@ mod tests {
         store.delete(&a.id).unwrap();
         assert_eq!(store.list().unwrap(), vec![b]);
         assert_eq!(store.get(&a.id).unwrap(), None);
+    }
+
+    #[test]
+    fn concurrent_opens_migrate_once() {
+        // Several processes (here threads, each with its own connection)
+        // opening a new store at once: each migration must run exactly once.
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("idedb.db");
+            let start = std::sync::Barrier::new(4);
+            std::thread::scope(|s| {
+                let opens: Vec<_> = (0..4)
+                    .map(|_| {
+                        s.spawn(|| {
+                            start.wait();
+                            Store::open(&path).map(drop)
+                        })
+                    })
+                    .collect();
+                for open in opens {
+                    open.join().unwrap().expect("open");
+                }
+            });
+            let store = Store::open(&path).unwrap();
+            let version: i64 = store.db.lock().unwrap().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            assert_eq!(version, MIGRATIONS.len() as i64);
+        }
     }
 
     #[test]

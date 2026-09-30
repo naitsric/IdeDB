@@ -11,6 +11,7 @@ idedb-core = { path = "crates/idedb-core" }
 idedb-driver-mysql = { path = "crates/idedb-driver-mysql" }
 idedb-driver-pg = { path = "crates/idedb-driver-pg" }
 idedb-driver-sqlite = { path = "crates/idedb-driver-sqlite" }
+idedb-drivers = { path = "crates/idedb-drivers" }
 idedb-store = { path = "crates/idedb-store" }
 
 chrono = { version = "0.4", default-features = false, features = ["std"] }

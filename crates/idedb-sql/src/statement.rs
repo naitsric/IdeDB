@@ -95,7 +95,11 @@ pub(crate) fn classify(engine: Engine, statement: &Statement) -> Verdict {
         // Whatever EXPLAIN would do, it is judged by what it explains:
         // `EXPLAIN (ANALYZE) DELETE …` runs the DELETE.
         Statement::Explain { statement, analyze, options, .. } => {
-            let analyze = *analyze || options.iter().flatten().any(|o| o.name.value.eq_ignore_ascii_case("analyze"));
+            let analyze = *analyze
+                || options.iter().flatten().any(|option| {
+                    let name = &option.name.value;
+                    name.eq_ignore_ascii_case("analyze") || name.eq_ignore_ascii_case("analyse")
+                });
             let inner = classify(engine, statement);
             let prefix = if analyze { "EXPLAIN ANALYZE" } else { "EXPLAIN" };
             Verdict { summary: format!("{prefix} {}", inner.summary), ..inner }
@@ -408,8 +412,8 @@ fn pragma(name: Option<&str>, has_value: bool) -> Verdict {
 /// sqlparser only accepts literal values, so it rejects the common
 /// `PRAGMA table_info(t)`.
 pub(crate) fn pragma_from_tokens(scan: &Scan) -> Verdict {
-    if !scan.ok() {
-        return write(W::Unparsed, "PRAGMA");
+    if !scan.default_tokenized() {
+        return fallback(scan);
     }
     let words = scan.words();
     let (name, rest) = match words.as_slice() {
@@ -426,10 +430,13 @@ pub(crate) fn pragma_from_tokens(scan: &Scan) -> Verdict {
 }
 
 /// A statement that did not parse (or was too long to), judged by its
-/// first keyword: what would be forbidden stays forbidden.
+/// first keyword: what would be forbidden stays forbidden. Text that did
+/// not even tokenize (an unterminated literal or comment…) is labelled as
+/// unreadable rather than by its first word.
 pub(crate) fn fallback(scan: &Scan) -> Verdict {
+    let unreadable = !scan.default_tokenized();
     let Some(first) = scan.first_keyword.as_deref() else {
-        return write(W::Unparsed, "Unrecognized statement");
+        return write(W::Unparsed, if unreadable { "Unreadable SQL" } else { "Unrecognized statement" });
     };
     let kind = match first {
         "BEGIN" | "START" | "COMMIT" | "END" | "ROLLBACK" | "ABORT" | "SAVEPOINT" | "RELEASE" | "LOCK" | "UNLOCK"
@@ -448,5 +455,6 @@ pub(crate) fn fallback(scan: &Scan) -> Verdict {
         "UPDATE" | "DELETE" => without_where(!scan.has_where),
         _ => Vec::new(),
     };
-    verdict(kind, first, warnings)
+    let summary = if unreadable && kind == Kind::Write(W::Unparsed) { "Unreadable SQL" } else { first };
+    verdict(kind, summary, warnings)
 }

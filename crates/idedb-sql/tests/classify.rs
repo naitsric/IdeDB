@@ -154,6 +154,14 @@ fn postgres() {
             ("select txid_current()", FUNC, NONE),
             ("select pg_current_xact_id()", FUNC, NONE),
             ("select pg_read_file('/etc/passwd')", FUNC, NONE),
+            ("select pg_stat_file('postgresql.conf')", FUNC, NONE),
+            ("select pg_ls_dir('.')", FUNC, NONE),
+            ("select * from pg_ls_logdir()", FUNC, NONE),
+            ("select * from pg_ls_waldir()", FUNC, NONE),
+            ("select pg_stat_statements_reset()", FUNC, NONE),
+            ("select pg_stat_reset()", FUNC, NONE),
+            ("select pg_sleep(10)", FUNC, NONE),
+            ("select pg_sleep_for('1 minute')", FUNC, NONE),
             ("explain analyze select nextval('s')", FUNC, NONE),
             // Their harmless relatives.
             ("select currval('s')", R, NONE),
@@ -161,6 +169,8 @@ fn postgres() {
             ("select now(), current_user, version()", R, NONE),
             ("select * from generate_series(1, 10)", R, NONE),
             ("select nextval from t", R, NONE),
+            // `:=` names an argument in Postgres; it only writes in MySQL.
+            ("select f(a := 1)", R, NONE),
             // Row locks. sqlparser 0.63 does not parse FOR NO KEY UPDATE or
             // FOR KEY SHARE; the token pass catches them.
             ("select * from t for share", LOCK, NONE),
@@ -181,6 +191,14 @@ fn postgres() {
             ("explain (analyze) delete from t where id = 1", DML, NONE),
             ("explain (analyze, format json) select 1", R, NONE),
             ("explain (costs off) insert into t values (1)", DML, NONE),
+            // sqlparser only knows the American spelling; ANALYSE is read as
+            // ANALYZE.
+            ("explain analyse delete from t", DML, NO_WHERE),
+            ("explain (analyse) delete from t where id = 1", DML, NONE),
+            ("explain analyse select 1", R, NONE),
+            // Invalid order, so it does not parse; the DELETE inside keeps it
+            // from looking like a read (see the looks_like_read test).
+            ("explain verbose analyse delete from t", UNPARSED, NONE),
             // Other reads.
             ("show search_path", R, NONE),
             ("show all", R, NONE),
@@ -276,6 +294,18 @@ fn postgres() {
             // followed by one holding a `;` is refused.
             ("select 'C:\\', ';'", MULTI, NONE),
             ("select 'C:\\' as path", R, NONE),
+            // Each reading is also parsed and the strictest one wins: with
+            // standard_conforming_strings on this is one literal, with it off
+            // the literal ends early and uncovers a DELETE in a CTE.
+            (
+                "with x as (select '\\''), d as (delete from t returning 1) select 1 as \"' as a) select * from x --\"",
+                DML,
+                NO_WHERE,
+            ),
+            // sqlparser rejects the escape; a `;` after that point starts a
+            // statement, and alone it is unreadable.
+            ("select E'\\uZZZZ'; delete from t", MULTI, NONE),
+            ("select E'\\uZZZZ'", UNPARSED, NONE),
         ],
     );
 }
@@ -301,11 +331,21 @@ fn mysql() {
             // sqlparser takes `--` followed by a no-break space for a comment;
             // MySQL does not.
             ("select 1 --\u{a0}; drop table t", MULTI, NONE),
-            // Backslash escapes, and NO_BACKSLASH_ESCAPES or ANSI_QUOTES, where
-            // the literal ends at the backslash: both readings are checked.
+            // Every combination of backslash escapes and ANSI_QUOTES is read;
+            // each of these hides the `;` from all readings but one or two.
             ("select 'a\\';drop table t; -- '", MULTI, NONE),
             ("select \"a\\\"; drop table t; -- \"", MULTI, NONE),
+            ("select \"\\\"\" ; drop table t; -- \"", MULTI, NONE),
+            // ANSI_QUOTES with backslash escapes: `"\"` is an identifier,
+            // `'\''` a quote.
+            ("select \"\\\" , '\\'' ; drop table t; -- '\"", MULTI, NONE),
             ("select 'it\\'s'", R, NONE),
+            // Under ANSI_QUOTES `"get_lock"` is a name, and this a call.
+            ("select \"get_lock\"('x', 1)", FUNC, NONE),
+            // Unterminated in the default reading: unreadable, and a `;`
+            // after that point starts a statement.
+            ("select 'abc\\'", UNPARSED, NONE),
+            ("select 'unterminated; drop table t", MULTI, NONE),
             ("select 'a;b', \"c;d\"", R, NONE),
             ("select `delete`, `for` from t", R, NONE),
             // Files.
@@ -315,11 +355,17 @@ fn mysql() {
             ("select 1 into /*c*/ outfile '/tmp/x'", FILE, NONE),
             ("load data infile '/tmp/x' into table t", FILE, NONE),
             ("load data local infile '/tmp/x' into table t", FILE, NONE),
-            // Variables are session state.
+            // Writing user variables is session state, however it is done.
+            // sqlparser 0.63 does not parse INTO after FROM, and reads `:=`
+            // as a plain expression; the token pass catches both.
             ("select 1 into @x", SESSION, NONE),
-            // sqlparser 0.63 does not parse INTO after FROM; it looks like a
-            // read and runs on the read-only session (user variables only).
-            ("select * from t into @x", UNPARSED, NONE),
+            ("select a, b into @a, @b from t", SESSION, NONE),
+            ("select * from t into @x", SESSION, NONE),
+            ("select @x := 1", SESSION, NONE),
+            ("select * from t where (@a := 1)", SESSION, NONE),
+            ("update t set a = (@x := @x + 1) where id = 1", SESSION, NONE),
+            ("set @x := 1", SESSION, NONE),
+            ("select @x, @@version", R, NONE),
             // Side-effect functions.
             ("select load_file('/etc/passwd')", FUNC, NONE),
             ("select get_lock('x', 10)", FUNC, NONE),
@@ -330,7 +376,11 @@ fn mysql() {
             ("select benchmark(1000000, md5('x'))", FUNC, NONE),
             ("select sys_exec('id')", FUNC, NONE),
             ("select sys_eval('id')", FUNC, NONE),
-            ("select sleep(1)", R, NONE),
+            // Waits hold the session (and a pool slot) as long as they like.
+            ("select sleep(1)", FUNC, NONE),
+            ("select master_pos_wait('binlog.000001', 4)", FUNC, NONE),
+            ("select source_pos_wait('binlog.000001', 4)", FUNC, NONE),
+            ("select wait_for_executed_gtid_set('3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5')", FUNC, NONE),
             // Row locks. sqlparser 0.63 does not parse LOCK IN SHARE MODE.
             ("select * from t lock in share mode", LOCK, NONE),
             ("select * from t for share nowait", LOCK, NONE),
@@ -507,15 +557,23 @@ fn looks_like_read_lets_read_like_unparsed_statements_through() {
     let cases = [
         (Engine::Postgres, "table t", true),
         (Engine::Postgres, "select 1 end", true),
-        (Engine::Mysql, "select * from t into @x", true),
         (Engine::Mysql, "(table t)", true),
+        (Engine::Mysql, "table t order by replace(a, 'x', 'y')", true),
         (Engine::Postgres, "refresh materialized view mv", false),
         (Engine::Postgres, "checkpoint", false),
         (Engine::Postgres, "create user u with password 'x'", false),
         (Engine::Mysql, "optimize table t", false),
-        // A literal that never ends: nothing can be said about it.
+        // EXPLAIN and WITH can wrap a write: a write keyword anywhere keeps
+        // an unparsed statement from looking like a read.
+        (Engine::Postgres, "explain verbose analyse delete from t", false),
+        (Engine::Postgres, "explain verbose analyse update t set a = 1", false),
+        (Engine::Mysql, "table t union select 1 from u into @x", false),
+        // A literal that never ends, in some reading: nothing can be said
+        // about it.
         (Engine::Postgres, "select 'unterminated", false),
+        (Engine::Postgres, "select E'\\uZZZZ'", false),
         (Engine::Mysql, "select 'unterminated\\'", false),
+        (Engine::Mysql, "table t where a = 'it\\'s'", false),
         // Token findings win over the first keyword.
         (Engine::Postgres, "select nextval('s') end", false),
         (Engine::Postgres, "select * from t for key share", false),
@@ -523,6 +581,7 @@ fn looks_like_read_lets_read_like_unparsed_statements_through() {
     for (engine, sql, expected) in cases {
         let got = classify(engine, sql);
         assert_eq!(got.looks_like_read, expected, "{engine:?} {sql:?}: {got:?}");
+        assert!(got.kind != R, "{engine:?} {sql:?} parsed as a read: {got:?}");
     }
     assert_eq!(classify(Engine::Postgres, "select nextval('s') end").kind, FUNC);
     assert_eq!(classify(Engine::Postgres, "select 'unterminated").kind, UNPARSED);
@@ -541,6 +600,13 @@ fn summaries_label_the_statement() {
         (Engine::Postgres, "drop role r", "DROP ROLE"),
         (Engine::Postgres, "explain analyze update t set a = 1", "EXPLAIN ANALYZE UPDATE"),
         (Engine::Postgres, "explain (analyze) delete from t", "EXPLAIN ANALYZE DELETE"),
+        (Engine::Postgres, "explain analyse delete from t", "EXPLAIN ANALYZE DELETE"),
+        (Engine::Postgres, "explain (analyse) select 1", "EXPLAIN ANALYZE SELECT"),
+        (Engine::Postgres, "select 'unterminated", "Unreadable SQL"),
+        (Engine::Mysql, "select 'abc\\'", "Unreadable SQL"),
+        (Engine::Mysql, "select @x := 1", "SELECT with := assignment"),
+        (Engine::Mysql, "select * from t into @x", "SELECT INTO @variable"),
+        (Engine::Mysql, "select 1 into @x", "SELECT INTO"),
         (Engine::Postgres, "with d as (delete from t returning *) select * from d", "SELECT with DELETE"),
         (Engine::Postgres, "with x as (select 1) insert into t select * from x", "INSERT"),
         (Engine::Postgres, "select pg_catalog.set_config('a', 'b', false)", "SELECT calling set_config()"),

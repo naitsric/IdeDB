@@ -70,6 +70,7 @@ crates/
   idedb-driver-mysql/   MySQL (mysql_async)
   idedb-driver-sqlite/  SQLite (rusqlite, bundled)
   idedb-drivers/        dispatch over the drivers (AnySession), opening a saved data source
+  idedb-sql/            SQL statement classifier for the MCP server: read, write or forbidden
   idedb-store/          data sources and query history (local SQLite), passwords (Keychain)
 ```
 

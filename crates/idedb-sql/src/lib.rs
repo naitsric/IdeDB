@@ -11,27 +11,31 @@
 //! the classifier does not know (user-defined ones, for instance) look like
 //! reads to it.
 //!
+//! Server settings the classifier cannot see decide where a literal or a
+//! quoted identifier ends: Postgres' `standard_conforming_strings`, MySQL's
+//! `NO_BACKSLASH_ESCAPES` and `ANSI_QUOTES`. The text is read once per
+//! combination (two for Postgres, four for MySQL, one for SQLite), every
+//! check runs on every reading, and the strictest outcome wins.
+//!
 //! [`classify`] works in three steps:
 //!
 //! 1. **Tokens**, which work even when parsing fails. More than one
-//!    statement is forbidden (a trailing `;` is fine), and so is empty input.
-//!    Calls to known functions with side effects (`set_config`, `nextval`,
-//!    `pg_advisory_lock`, `get_lock`, `load_file`…) turn a read into a
-//!    write, and so do row locks (`FOR UPDATE`…); MySQL `INTO OUTFILE` and
-//!    `INTO DUMPFILE` are forbidden. MySQL executable comments (`/*! … */`,
-//!    MariaDB's `/*M! … */`) count as code. Postgres and MySQL are also
-//!    tokenized with the opposite backslash rule in string literals, because
-//!    the server's setting (`standard_conforming_strings`,
-//!    `NO_BACKSLASH_ESCAPES`) decides where a literal ends: every check runs
-//!    on both readings.
-//! 2. **Parse** with the engine's dialect (sqlparser). A statement that does
-//!    not parse is classified by its first keyword: transaction control,
-//!    `SET`, `COPY`, cursors… stay forbidden, `DO` and `CALL` are
-//!    procedural, and anything else is [`WriteKind::Unparsed`]. So is a
-//!    statement of more than 10,000 tokens, which is not parsed: dropping
-//!    the deep trees sqlparser builds for long `a + b + …` chains could
-//!    overflow the stack. SQLite `PRAGMA` is classified from its tokens
-//!    (sqlparser rejects `PRAGMA table_info(t)`).
+//!    statement is forbidden (a trailing `;` is fine), and so is empty input;
+//!    where a reading fails to tokenize, a `;` followed by more text after
+//!    that point counts as a second statement. Calls to known functions with
+//!    side effects or waits (`set_config`, `nextval`, `pg_advisory_lock`,
+//!    `pg_sleep`, `get_lock`, `load_file`…) turn a read into a write, and so
+//!    do row locks (`FOR UPDATE`…). MySQL `INTO OUTFILE`/`INTO DUMPFILE` and
+//!    user variable writes (`INTO @x`, `@x := …`) are forbidden. MySQL
+//!    executable comments (`/*! … */`, MariaDB's `/*M! … */`) count as code.
+//! 2. **Parse** each reading with the engine's dialect (sqlparser). A
+//!    statement that does not parse is classified by its first keyword:
+//!    transaction control, `SET`, `COPY`, cursors… stay forbidden, `DO` and
+//!    `CALL` are procedural, and anything else is [`WriteKind::Unparsed`]. So
+//!    is a statement of more than 10,000 tokens, which is not parsed:
+//!    dropping the deep trees sqlparser builds for long `a + b + …` chains
+//!    could overflow the stack. SQLite `PRAGMA` is classified from its
+//!    tokens (sqlparser rejects `PRAGMA table_info(t)`).
 //! 3. **Rules** on the parsed statement; see [`Kind`] and its parts.
 //!
 //! A `;` anywhere outside literals and comments separates statements, so
@@ -59,12 +63,19 @@ pub struct Classification {
     pub summary: String,
     pub warnings: Vec<Warning>,
     /// Whether the read-only `query` tool may run the statement: true for
-    /// every [`Kind::Read`], and for a [`WriteKind::Unparsed`] statement whose
-    /// first keyword is `SELECT`, `WITH`, `SHOW`, `EXPLAIN`, `DESCRIBE`,
-    /// `DESC`, `VALUES` or `TABLE` (the engine's read-only session is the
-    /// barrier for those); false for everything else. The token checks
-    /// never let a statement through: with a side-effect function or a row
-    /// lock the kind is no longer `Unparsed`.
+    /// every [`Kind::Read`], and for a [`WriteKind::Unparsed`] statement
+    /// (the engine's read-only session is the barrier for those) that
+    ///
+    /// - starts with `SELECT`, `WITH`, `SHOW`, `EXPLAIN`, `DESCRIBE`, `DESC`,
+    ///   `VALUES` or `TABLE`,
+    /// - has no keyword of a write anywhere (`INSERT`, `UPDATE`, `DELETE`,
+    ///   `CREATE`, `SET`, `COPY`… not followed by `(`), since `EXPLAIN` and
+    ///   `WITH` can wrap one,
+    /// - and tokenized under every reading.
+    ///
+    /// False for everything else. The token checks never let a statement
+    /// through: with a side-effect function or a row lock the kind is no
+    /// longer `Unparsed`.
     pub looks_like_read: bool,
 }
 
@@ -156,7 +167,7 @@ const READ_KEYWORDS: &[&str] = &["SELECT", "WITH", "SHOW", "EXPLAIN", "DESCRIBE"
 /// understand is a write ([`WriteKind::Unparsed`]) or forbidden.
 pub fn classify(engine: Engine, sql: &str) -> Classification {
     let scan = scan::scan(engine, sql);
-    if scan.is_empty() {
+    if scan.empty {
         return verdict(Kind::Forbidden(Forbidden::Empty), "Empty statement", Vec::new()).finish(false);
     }
     if scan.multiple_statements {
@@ -172,22 +183,42 @@ pub fn classify(engine: Engine, sql: &str) -> Classification {
     let mut verdict = if engine == Engine::Sqlite && first == Some("PRAGMA") {
         statement::pragma_from_tokens(&scan)
     } else {
-        match scan.parse(engine) {
-            Some(parsed) => statement::classify(engine, &parsed),
+        // The default reading names the statement; another server setting
+        // can only make it stricter (a literal that ends early under it can
+        // uncover a data-modifying WITH, for instance).
+        let parsed = |reading| match scan.parse(engine, reading) {
+            Some(statement) => statement::classify(engine, &statement),
             None => statement::fallback(&scan),
+        };
+        let mut verdict = parsed(0);
+        for reading in scan.other_readings() {
+            let other = parsed(reading);
+            verdict.warnings.extend(&other.warnings);
+            if strictness(other.kind) > strictness(verdict.kind) {
+                verdict.kind = other.kind;
+                verdict.summary = other.summary;
+            }
         }
+        verdict
     };
 
-    let read_keyword = scan.ok() && first.is_some_and(|word| READ_KEYWORDS.contains(&word));
-    let looks_like_read = |kind: Kind| match kind {
+    if let Some(variable) = scan.user_variable
+        && !matches!(verdict.kind, Kind::Forbidden(_))
+    {
+        let summary = format!("{} {variable}", verdict.summary);
+        verdict = self::verdict(Kind::Forbidden(Forbidden::SessionState), summary, Vec::new());
+    }
+
+    // The token checks catch what the parser may not see (or not parse):
+    // they turn a read, or an unparsed statement that starts like one,
+    // into a write of their kind.
+    let read_start = first.is_some_and(|word| READ_KEYWORDS.contains(&word));
+    let upgradable = match verdict.kind {
         Kind::Read => true,
-        Kind::Write(WriteKind::Unparsed) => read_keyword,
+        Kind::Write(WriteKind::Unparsed) => read_start,
         _ => false,
     };
-    // The token checks catch what the parser may not see (or not parse):
-    // they turn a read, or an unparsed statement that looks like one, into
-    // a write.
-    if looks_like_read(verdict.kind) {
+    if upgradable {
         if let Some(function) = &scan.side_effect_function {
             verdict.kind = Kind::Write(WriteKind::SideEffectFunction);
             verdict.summary = format!("{} calling {function}()", verdict.summary);
@@ -196,8 +227,22 @@ pub fn classify(engine: Engine, sql: &str) -> Classification {
             verdict.summary = format!("{} {lock}", verdict.summary);
         }
     }
-    let looks_like_read = looks_like_read(verdict.kind);
+    let looks_like_read = match verdict.kind {
+        Kind::Read => true,
+        Kind::Write(WriteKind::Unparsed) => read_start && scan.write_keyword.is_none() && scan.tokenized(),
+        _ => false,
+    };
     verdict.finish(looks_like_read)
+}
+
+/// How much a kind holds a statement back, to pick the strictest reading.
+fn strictness(kind: Kind) -> u8 {
+    match kind {
+        Kind::Read => 0,
+        Kind::Write(WriteKind::Unparsed) => 1,
+        Kind::Write(_) => 2,
+        Kind::Forbidden(_) => 3,
+    }
 }
 
 /// A classification in the making.

@@ -1,13 +1,20 @@
-//! Saved data sources, their passwords and query history.
+//! Saved data sources, their passwords, query history, app settings and the
+//! MCP server's clients, grants and audit log.
 //!
 //! Data sources live in a local SQLite file; connection parameters are
 //! stored as JSON so new fields need no migration. Passwords never touch
 //! that file: they go to a [`SecretStore`], the macOS Keychain in the app.
+//!
+//! Foreign keys are not enforced: deleting a row cleans up what refers to it
+//! explicitly (see [`Store::delete`]).
 
 mod history;
+mod mcp;
 mod secrets;
+mod settings;
 
 pub use history::{HistoryEntry, NewHistoryEntry};
+pub use mcp::{Access, AuditEntry, AuditFilter, Decision, Grant, McpClient, NewAuditEntry, Transport};
 #[cfg(target_os = "macos")]
 pub use secrets::Keychain;
 pub use secrets::{MemorySecrets, SecretStore};
@@ -16,7 +23,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use idedb_core::ConnectionParams;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -65,6 +72,61 @@ const MIGRATIONS: &[&str] = &[
         error text
     );
     create index query_history_by_source on query_history (data_source_id, executed_at)",
+    // Generic app settings (JSON values), then the MCP server: clients with
+    // their token hash, per data source grants and policy, and the audit log.
+    // Audit rows copy client and data source names so they outlive both.
+    "create table setting (
+        key text primary key,
+        value text not null
+    );
+    create table mcp_client (
+        id text primary key,
+        name text not null,
+        token_hash blob not null unique,
+        token_prefix text not null,
+        created_at text not null,
+        last_seen_at text,
+        last_client_name text,
+        last_client_version text,
+        revoked_at text
+    );
+    create table mcp_grant (
+        client_id text not null,
+        data_source_id text not null,
+        access text not null check (access in ('read', 'write')),
+        primary key (client_id, data_source_id)
+    );
+    create table mcp_data_source (
+        data_source_id text primary key,
+        never_write integer not null default 0
+    );
+    create table mcp_audit (
+        id integer primary key,
+        at text not null,
+        client_id text,
+        client_name text not null,
+        client_info_name text,
+        client_info_version text,
+        protocol_version text,
+        transport text not null check (transport in ('http', 'bridge')),
+        session_key text,
+        tool text not null,
+        data_source_id text,
+        data_source_name text,
+        sql text,
+        sql_truncated integer not null default 0,
+        statement_kind text,
+        reason text,
+        decision text not null
+            check (decision in ('allowed', 'approved', 'rejected', 'denied', 'timeout', 'withdrawn')),
+        approval_wait_ms integer,
+        elapsed_ms integer,
+        row_count integer,
+        truncated integer not null default 0,
+        error text
+    );
+    create index mcp_audit_by_client on mcp_audit (client_id, id);
+    create index mcp_audit_by_source on mcp_audit (data_source_id, id)",
 ];
 
 pub struct Store {
@@ -80,12 +142,8 @@ impl Store {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(db: Connection) -> Result<Self> {
-        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        for (i, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-            db.execute_batch(migration)?;
-            db.pragma_update(None, "user_version", i as i64 + 1)?;
-        }
+    fn init(mut db: Connection) -> Result<Self> {
+        migrate(&mut db, MIGRATIONS)?;
         Ok(Self { db: Mutex::new(db) })
     }
 
@@ -127,9 +185,39 @@ impl Store {
         Ok(source)
     }
 
+    /// Also drops the data source's MCP grants and policy, in the same
+    /// transaction. Its query history and MCP audit rows stay; audit rows
+    /// keep the data source's name.
     pub fn delete(&self, id: &str) -> Result<()> {
-        self.db.lock().unwrap().execute("delete from data_source where id = ?1", [id])?;
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute("delete from data_source where id = ?1", [id])?;
+        mcp::forget_data_source(&tx, id)?;
+        tx.commit()?;
         Ok(())
+    }
+}
+
+/// Runs the migrations past `user_version`, each one and its version bump in
+/// one transaction, so a failing migration leaves the store as it was.
+///
+/// Another process may be opening the same store: each transaction takes
+/// the write lock up front (waiting out the other one, up to rusqlite's
+/// busy timeout) and re-reads the version under it, so no migration runs
+/// twice.
+fn migrate(db: &mut Connection, migrations: &[&str]) -> Result<()> {
+    let user_version = |db: &Connection| db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0));
+    // Up to date, the common case: no need for the write lock.
+    if user_version(db)? as usize >= migrations.len() {
+        return Ok(());
+    }
+    loop {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version = user_version(&tx)?;
+        let Some(migration) = migrations.get(version as usize) else { return Ok(()) };
+        tx.execute_batch(migration)?;
+        tx.pragma_update(None, "user_version", version + 1)?;
+        tx.commit()?;
     }
 }
 
@@ -186,6 +274,52 @@ mod tests {
         store.delete(&a.id).unwrap();
         assert_eq!(store.list().unwrap(), vec![b]);
         assert_eq!(store.get(&a.id).unwrap(), None);
+    }
+
+    #[test]
+    fn concurrent_opens_migrate_once() {
+        // Several processes (here threads, each with its own connection)
+        // opening a new store at once: each migration must run exactly once.
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("idedb.db");
+            let start = std::sync::Barrier::new(4);
+            std::thread::scope(|s| {
+                let opens: Vec<_> = (0..4)
+                    .map(|_| {
+                        s.spawn(|| {
+                            start.wait();
+                            Store::open(&path).map(drop)
+                        })
+                    })
+                    .collect();
+                for open in opens {
+                    open.join().unwrap().expect("open");
+                }
+            });
+            let store = Store::open(&path).unwrap();
+            let version: i64 = store.db.lock().unwrap().pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            assert_eq!(version, MIGRATIONS.len() as i64);
+        }
+    }
+
+    #[test]
+    fn a_failing_migration_changes_nothing() {
+        let mut db = Connection::open_in_memory().unwrap();
+        migrate(&mut db, &["create table a (x)"]).unwrap();
+        // The second migration creates `b`, then fails on a syntax error.
+        assert!(migrate(&mut db, &["create table a (x)", "create table b (x); create table c ("]).is_err());
+
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 1);
+        let tables: Vec<String> = db
+            .prepare("select name from sqlite_master where type = 'table' order by name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(tables, ["a"]);
     }
 
     #[test]

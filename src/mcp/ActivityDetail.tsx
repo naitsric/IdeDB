@@ -100,7 +100,8 @@ export function ActivityDetail({ entry }: { entry: AuditEntry | undefined }) {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-3">
+      {/* Keyed, so each call's details start from the top. */}
+      <div key={entry.id} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 py-3">
         {entry.error && (
           <Notice tone="danger" icon={CircleAlert}>
             <span className="selectable min-w-0 [overflow-wrap:anywhere]">{entry.error}</span>

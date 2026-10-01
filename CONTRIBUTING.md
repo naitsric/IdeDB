@@ -46,7 +46,7 @@ always run.
 ## Project layout
 
 ```
-.github/workflows/   CI (Linux) and the manual Release workflow (macOS)
+.github/workflows/   CI (Linux) and the manual Release workflow (macOS and Linux)
 scripts/             release-version.mjs (version bump), render-icon.mjs (app icon)
 design/              app icon source (icon.svg) and its 1024px render
 dev/seed/            sample data loaded into the Docker databases and CI
@@ -182,21 +182,28 @@ Actions → Release → Run workflow, or:
 ```sh
 gh workflow run release.yml -f bump=minor
 gh workflow run release.yml -f bump=patch -f dry_run=true   # build only
+gh workflow run release.yml --ref my-branch -f dry_run=true -f platforms=linux
 ```
 
-| Input     | Default   | Meaning                                                                         |
-| --------- | --------- | ------------------------------------------------------------------------------- |
-| `bump`    | `patch`   | `patch`, `minor` or `major`                                                     |
-| `target`  | `aarch64` | `aarch64` (Apple Silicon) or `universal` (adds Intel, builds longer)            |
-| `draft`   | `true`    | publish the GitHub Release as a draft                                           |
-| `dry_run` | `false`   | only build and attach the bundle to the workflow run: no commit, tag or release |
+| Input       | Default   | Meaning                                                                          |
+| ----------- | --------- | -------------------------------------------------------------------------------- |
+| `bump`      | `patch`   | `patch`, `minor` or `major`                                                      |
+| `platforms` | `all`     | `all`, `macos` or `linux`                                                        |
+| `target`    | `aarch64` | macOS: `aarch64` (Apple Silicon) or `universal` (adds Intel, builds longer)      |
+| `draft`     | `true`    | publish the GitHub Release as a draft                                            |
+| `dry_run`   | `false`   | only build and attach the bundles to the workflow run: no commit, tag or release |
 
 The workflow bumps the version with `scripts/release-version.mjs`
 (`package.json` is the source of truth; `tauri.conf.json` reads it and the
 Cargo workspace version follows), commits `Release vX.Y.Z` to `main`, tags
-it, builds `IdeDB.app` and a `.dmg` on macOS, and publishes both in a GitHub
-Release with generated notes. If `main` is protected against direct pushes,
-allow `github-actions[bot]` to push or the version job will fail.
+it, builds `IdeDB.app` and a `.dmg` on macOS and a `.deb`, an `.rpm` and an
+AppImage on Linux, and publishes them all in one GitHub Release with
+generated notes. If `main` is protected against direct pushes, allow
+`github-actions[bot]` to push or the version job will fail. A dry run can
+run from any branch.
+
+The Linux bundles are built on Ubuntu 22.04 on purpose: an AppImage only runs
+where glibc is at least as new as on the machine that built it.
 
 **Code signing.** Until the Apple secrets exist, builds are ad-hoc signed and
 not notarized, so macOS blocks them after download; testers run
@@ -209,7 +216,8 @@ on by itself when these repository secrets are set:
   notarization.
 
 A release build uses the macOS runner for roughly 10–20 minutes (`universal`
-takes longer), which counts 10x while the repository is private. Auto-updates
+takes longer), which counts 10x while the repository is private;
+`platforms=linux` leaves it out, for trying the Linux bundles. Auto-updates
 are not wired yet: release assets of a private repository cannot be
 downloaded without authentication.
 

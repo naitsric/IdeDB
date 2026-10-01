@@ -121,6 +121,10 @@ after installing:
 xattr -dr com.apple.quarantine /Applications/IdeDB.app
 ```
 
+On Linux (x86_64), the same release has a `.deb` for Debian and Ubuntu, an
+`.rpm` for Fedora and openSUSE, and an `.AppImage` for other distributions.
+Linux builds don't save passwords yet: IdeDB forgets them when it quits.
+
 ## Connect an LLM over MCP
 
 IdeDB can share your connections with an AI assistant (Claude Code, Claude

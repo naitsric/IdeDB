@@ -16,7 +16,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 idedb-core.workspace = true
 idedb-drivers.workspace = true
-idedb-mcp.workspace = true
+# `bridge`: `idedb mcp-bridge`, see src/main.rs.
+idedb-mcp = { workspace = true, features = ["bridge"] }
 idedb-store.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true

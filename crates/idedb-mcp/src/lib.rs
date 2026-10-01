@@ -24,8 +24,14 @@
 //! None of this stops what the database user itself may do with a read
 //! (see [`idedb_core::ConnectOptions::read_only`]): connecting as a
 //! read-only database user is what finally limits it.
+//!
+//! With the `bridge` feature, [`bridge`] is the other side: a stdio MCP
+//! server for clients that only launch those (Claude Desktop), relaying
+//! everything to this one over HTTP.
 
 mod approvals;
+#[cfg(feature = "bridge")]
+pub mod bridge;
 mod handler;
 mod http;
 mod output;
@@ -49,7 +55,7 @@ pub use approvals::{ApprovalRequest, Progress};
 pub use idedb_store::{AuditEntry, Decision, Transport};
 pub use self::http::{MCP_PATH, ServerStatus, StartError};
 pub use output::INSTRUCTIONS;
-pub use settings::{MAX_ROWS, McpSettings};
+pub use settings::{DEFAULT_PORT, MAX_ROWS, McpSettings};
 pub use token::{hash_token, new_token};
 pub use tokio_util::sync::CancellationToken;
 pub use tools::{

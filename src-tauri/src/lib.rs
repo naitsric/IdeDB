@@ -23,6 +23,18 @@ fn secret_store(_app: &tauri::App) -> Box<dyn SecretStore> {
     Box::new(idedb_store::MemorySecrets::default())
 }
 
+/// The bundle identifier in tauri.conf.json, which the stdio bridge opens
+/// the app by.
+const BUNDLE_ID: &str = "io.github.naitsric.idedb";
+
+/// `idedb mcp-bridge [--port <port>]` (see main.rs): relays an MCP client's
+/// stdin and stdout to the app's MCP server, opening the app if it isn't
+/// running. Never starts the app in this process. Returns the exit code.
+pub fn mcp_bridge_main() -> i32 {
+    let args = std::env::args_os().skip(2).map(|arg| arg.to_string_lossy().into_owned());
+    idedb_mcp::bridge::main(args, BUNDLE_ID)
+}
+
 /// Ends the app. The UI's Quit (menu and ⌘Q) calls it only after asking
 /// about open transactions; see src/db/transactions.ts.
 #[tauri::command]
@@ -89,4 +101,13 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_bridge_opens_the_app_by_its_bundle_identifier() {
+        let config = include_str!("../tauri.conf.json");
+        assert!(config.contains(&format!(r#""identifier": "{}""#, super::BUNDLE_ID)));
+    }
 }

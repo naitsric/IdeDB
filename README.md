@@ -121,6 +121,70 @@ after installing:
 xattr -dr com.apple.quarantine /Applications/IdeDB.app
 ```
 
+## Connect an LLM over MCP
+
+IdeDB can share your connections with an AI assistant (Claude Code, Claude
+Desktop, Cursor or any [MCP](https://modelcontextprotocol.io) client). The
+assistant never sees your passwords: it asks IdeDB, and IdeDB decides what
+runs and keeps a record of every call.
+
+1. **Turn the server on.** Open the MCP tool window (⌘8) and switch it on
+   under **Server**. It listens on `127.0.0.1:7412`, reachable from this Mac
+   only, and stays off until you turn it on.
+2. **Create a client** for each assistant under **Clients**. IdeDB shows its
+   token once, next to ready-to-paste setup for each assistant. Then pick
+   which connections it may read, and which it may also write to. A
+   connection's password must be saved in IdeDB to be shared.
+3. **Connect the assistant**, with `<TOKEN>` replaced by the client's token.
+
+**Claude Code**, in a terminal:
+
+```sh
+claude mcp add --transport http idedb http://127.0.0.1:7412/mcp --header "Authorization: Bearer <TOKEN>"
+```
+
+**Cursor**, in `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "idedb": {
+      "url": "http://127.0.0.1:7412/mcp",
+      "headers": { "Authorization": "Bearer <TOKEN>" }
+    }
+  }
+}
+```
+
+**Claude Desktop** only launches local programs, so it runs IdeDB's own
+bridge. In Claude, open Settings → Developer → Edit Config, add this to
+`claude_desktop_config.json` and restart Claude. If IdeDB isn't open, the
+bridge opens it in the background.
+
+```json
+{
+  "mcpServers": {
+    "idedb": {
+      "command": "/Applications/IdeDB.app/Contents/MacOS/idedb",
+      "args": ["mcp-bridge", "--port", "7412"],
+      "env": { "IDEDB_MCP_TOKEN": "<TOKEN>" }
+    }
+  }
+}
+```
+
+**You approve every write.** Reads run in read-only sessions. Anything that
+changes data or schema waits for you in IdeDB, which shows the client that
+asked, the connection, the full SQL with a warning for a `DELETE` without
+`WHERE` or a `DROP`, and the assistant's reason. Reject has the focus and
+Enter never approves. Mark a connection **Never write** to refuse writes
+without asking. Revoking a client stops its token at once.
+
+**Share connections through a read-only database user.** A read-only session
+stops writes, but not everything the database user itself is allowed to do
+(in Postgres, for example, cancelling its own other sessions). A user that
+can only read is the limit that holds.
+
 ## Roadmap
 
 - SSH tunnels

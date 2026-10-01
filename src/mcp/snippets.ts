@@ -14,7 +14,13 @@ export function endpointUrl(port: number): string {
   return `http://127.0.0.1:${port}/mcp`;
 }
 
-export type SnippetId = "claudeCode" | "cursor" | "other";
+/**
+ * IdeDB's executable once installed, which stdio-only clients run as `<it> mcp-bridge`.
+ * The app reports the one it actually runs from (see `mcpApi.endpoint`); this is for until it does.
+ */
+export const INSTALLED_BRIDGE_COMMAND = "/Applications/IdeDB.app/Contents/MacOS/idedb";
+
+export type SnippetId = "claudeCode" | "claudeDesktop" | "cursor" | "other";
 
 export interface Snippet {
   id: SnippetId;
@@ -49,11 +55,33 @@ export function genericSnippet(url: string, token: string): string {
   return `URL:    ${url}\nHeader: Authorization: Bearer ${token}`;
 }
 
-/** Every snippet for the server on `port`, with the token or the placeholder. */
-export function snippets(port: number, token: string = TOKEN_PLACEHOLDER): Snippet[] {
+/**
+ * A `claude_desktop_config.json` that runs IdeDB's stdio bridge, `command mcp-bridge --port <port>`,
+ * with the token in its environment: arguments are visible to other processes.
+ */
+export function claudeDesktopSnippet(command: string, port: number, token: string): string {
+  const server = { command, args: ["mcp-bridge", "--port", String(port)], env: { IDEDB_MCP_TOKEN: token } };
+  return JSON.stringify({ mcpServers: { [SERVER_NAME]: server } }, null, 2);
+}
+
+/**
+ * Every snippet for the server on `port`, with the token or the placeholder. `bridgeCommand` is the
+ * executable stdio-only clients run.
+ */
+export function snippets(
+  port: number,
+  token: string = TOKEN_PLACEHOLDER,
+  bridgeCommand: string = INSTALLED_BRIDGE_COMMAND,
+): Snippet[] {
   const url = endpointUrl(port);
   return [
     { id: "claudeCode", label: "Claude Code", hint: "Run in a terminal.", text: claudeCodeSnippet(url, token) },
+    {
+      id: "claudeDesktop",
+      label: "Claude Desktop",
+      hint: "Add to claude_desktop_config.json (Settings → Developer → Edit Config), then restart Claude.",
+      text: claudeDesktopSnippet(bridgeCommand, port, token),
+    },
     {
       id: "cursor",
       label: "Cursor",

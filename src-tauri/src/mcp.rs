@@ -7,6 +7,7 @@
 //! `{"kind": "approvalRequested", ...}`…). A write waiting for approval
 //! also brings the window to the front.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use idedb_mcp::{
@@ -109,6 +110,20 @@ fn endpoint(port: u16) -> String {
     format!("http://127.0.0.1:{port}{MCP_PATH}")
 }
 
+/// The app's executable once installed. `tauri build` names it after the
+/// Cargo package, since tauri.conf.json sets no `mainBinaryName`.
+const INSTALLED_EXECUTABLE: &str = "/Applications/IdeDB.app/Contents/MacOS/idedb";
+
+/// What MCP clients that only launch stdio servers run, as
+/// `<command> mcp-bridge`: the executable this app runs from, so a dev build
+/// names the dev binary. An app macOS translocated (opened from Downloads
+/// while quarantined) runs from a random path that goes away: then the
+/// installed one.
+fn bridge_command(executable: &Path) -> Option<String> {
+    let path = executable.to_str()?;
+    Some(if path.contains("/AppTranslocation/") { INSTALLED_EXECUTABLE } else { path }.to_owned())
+}
+
 impl From<idedb_mcp::Error> for CommandError {
     fn from(e: idedb_mcp::Error) -> Self {
         match e {
@@ -143,8 +158,12 @@ pub struct ClientWithToken {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Endpoint {
     url: String,
+    /// The executable that runs the stdio bridge (see [`bridge_command`]);
+    /// None when it can't be told.
+    bridge_command: Option<String>,
 }
 
 // Commands are async so the store and Keychain never block the main thread.
@@ -293,14 +312,15 @@ pub async fn mcp_approvals_pending(mcp: State<'_, McpState>) -> CommandResult<Ve
 }
 
 /// Where clients reach the server: the port it listens on, else the saved
-/// one.
+/// one; and what stdio clients run to reach it.
 #[tauri::command]
 pub async fn mcp_endpoint(mcp: State<'_, McpState>) -> CommandResult<Endpoint> {
     let port = match mcp.0.status().port {
         Some(port) => port,
         None => mcp.0.settings()?.port,
     };
-    Ok(Endpoint { url: endpoint(port) })
+    let executable = std::env::current_exe().ok().map(|path| path.canonicalize().unwrap_or(path));
+    Ok(Endpoint { url: endpoint(port), bridge_command: executable.as_deref().and_then(bridge_command) })
 }
 
 #[cfg(test)]
@@ -344,6 +364,25 @@ mod tests {
     #[test]
     fn the_endpoint_is_on_the_loopback_ip() {
         assert_eq!(endpoint(7412), "http://127.0.0.1:7412/mcp");
+    }
+
+    #[test]
+    fn the_bridge_runs_this_executable_unless_translocated() {
+        let installed = Path::new(INSTALLED_EXECUTABLE);
+        assert_eq!(bridge_command(installed).as_deref(), Some(INSTALLED_EXECUTABLE));
+        let dev = Path::new("/Users/me/My Projects/idedb/target/debug/idedb");
+        assert_eq!(bridge_command(dev).as_deref(), Some("/Users/me/My Projects/idedb/target/debug/idedb"));
+        let translocated = Path::new("/private/var/folders/x/T/AppTranslocation/0A1B/d/IdeDB.app/Contents/MacOS/idedb");
+        assert_eq!(bridge_command(translocated).as_deref(), Some(INSTALLED_EXECUTABLE));
+    }
+
+    #[test]
+    fn the_installed_executable_is_where_tauri_build_puts_it() {
+        let config = include_str!("../tauri.conf.json");
+        assert!(config.contains(r#""productName": "IdeDB""#));
+        // Without it, the executable is named after the package.
+        assert!(!config.contains("mainBinaryName"));
+        assert_eq!(INSTALLED_EXECUTABLE, format!("/Applications/IdeDB.app/Contents/MacOS/{}", env!("CARGO_PKG_NAME")));
     }
 
     #[test]

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   claudeCodeSnippet,
+  claudeDesktopSnippet,
   cursorSnippet,
   endpointUrl,
   genericSnippet,
+  INSTALLED_BRIDGE_COMMAND,
   shellArg,
   snippets,
   TOKEN_PLACEHOLDER,
@@ -59,25 +61,64 @@ describe("Cursor", () => {
   });
 });
 
+describe("Claude Desktop", () => {
+  it("is a claude_desktop_config.json that runs the stdio bridge, with the token in its environment", () => {
+    expect(JSON.parse(claudeDesktopSnippet(INSTALLED_BRIDGE_COMMAND, 7412, TOKEN))).toEqual({
+      mcpServers: {
+        idedb: {
+          command: "/Applications/IdeDB.app/Contents/MacOS/idedb",
+          args: ["mcp-bridge", "--port", "7412"],
+          env: { IDEDB_MCP_TOKEN: TOKEN },
+        },
+      },
+    });
+  });
+
+  it("keeps the token out of the arguments, which other processes can read", () => {
+    const server = JSON.parse(claudeDesktopSnippet(INSTALLED_BRIDGE_COMMAND, 7412, TOKEN)).mcpServers.idedb;
+    expect(server.args.join(" ")).not.toContain(TOKEN);
+  });
+
+  it("escapes the executable's path as JSON: spaces stay, quotes and backslashes are escaped", () => {
+    const command = '/Users/me/My Apps/IdeDB "dev".app/Contents/MacOS/idedb\\x';
+    const text = claudeDesktopSnippet(command, 7500, TOKEN);
+    expect(text).toContain('"/Users/me/My Apps/IdeDB \\"dev\\".app/Contents/MacOS/idedb\\\\x"');
+    expect(JSON.parse(text).mcpServers.idedb.command).toBe(command);
+    expect(JSON.parse(text).mcpServers.idedb.args).toEqual(["mcp-bridge", "--port", "7500"]);
+  });
+
+  it("carries the placeholder where the token isn't known", () => {
+    const desktop = snippets(7412).find((s) => s.id === "claudeDesktop")!;
+    expect(JSON.parse(desktop.text).mcpServers.idedb.env).toEqual({ IDEDB_MCP_TOKEN: "<TOKEN>" });
+  });
+
+  it("runs the installed app unless told which executable the app runs from", () => {
+    const command = (bridge?: string) =>
+      JSON.parse(snippets(7412, TOKEN, bridge).find((s) => s.id === "claudeDesktop")!.text).mcpServers.idedb.command;
+    expect(command()).toBe(INSTALLED_BRIDGE_COMMAND);
+    expect(command("/Users/me/idedb/target/debug/idedb")).toBe("/Users/me/idedb/target/debug/idedb");
+  });
+});
+
 describe("snippets", () => {
-  it("offers Claude Code, Cursor and a generic URL and header, all on the port", () => {
+  it("offers Claude Code, Claude Desktop, Cursor and a generic URL and header, all on the port", () => {
     const all = snippets(7999, TOKEN);
-    expect(all.map((s) => s.id)).toEqual(["claudeCode", "cursor", "other"]);
-    for (const snippet of all) {
+    expect(all.map((s) => s.id)).toEqual(["claudeCode", "claudeDesktop", "cursor", "other"]);
+    for (const snippet of all.filter((s) => s.id !== "claudeDesktop")) {
       expect(snippet.text).toContain("http://127.0.0.1:7999/mcp");
       expect(snippet.text).toContain(`Bearer ${TOKEN}`);
     }
-    expect(all[2].text).toBe(genericSnippet("http://127.0.0.1:7999/mcp", TOKEN));
+    expect(all[1].text).toBe(claudeDesktopSnippet(INSTALLED_BRIDGE_COMMAND, 7999, TOKEN));
+    expect(all[3].text).toBe(genericSnippet("http://127.0.0.1:7999/mcp", TOKEN));
   });
 
   it("uses the placeholder unless given the token", () => {
     for (const snippet of snippets(7412)) {
-      expect(snippet.text).toContain("Bearer <TOKEN>");
+      expect(snippet.text).toContain(TOKEN_PLACEHOLDER);
       expect(snippet.text).not.toContain("idedb_");
     }
-  });
-
-  it("has no Claude Desktop snippet yet: it needs the stdio bridge", () => {
-    expect(snippets(7412).some((s) => /desktop/i.test(s.label))).toBe(false);
+    for (const snippet of snippets(7412).filter((s) => s.id !== "claudeDesktop")) {
+      expect(snippet.text).toContain("Bearer <TOKEN>");
+    }
   });
 });

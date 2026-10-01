@@ -1,10 +1,46 @@
 import { Check, Copy } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cx, IconButton, Segmented } from "../ui/primitives";
-import { snippets, type SnippetId } from "./snippets";
+import { mcpApi } from "./api";
+import { INSTALLED_BRIDGE_COMMAND, snippets, type SnippetId } from "./snippets";
 
 /** How long a copy button shows it copied. */
 const COPIED_MS = 1500;
+
+/** The executable the app runs from, once known: it doesn't change while the app runs. */
+let knownBridgeCommand: string | undefined;
+let loadingBridgeCommand: Promise<string> | undefined;
+
+function loadBridgeCommand(): Promise<string> {
+  loadingBridgeCommand ??= (async () => {
+    try {
+      return (await mcpApi.endpoint()).bridgeCommand ?? INSTALLED_BRIDGE_COMMAND;
+    } catch {
+      // The snippet still helps: most installs are in /Applications.
+      return INSTALLED_BRIDGE_COMMAND;
+    }
+  })().then((command) => (knownBridgeCommand = command));
+  return loadingBridgeCommand;
+}
+
+/**
+ * What stdio-only clients run to reach IdeDB: the installed app's executable, until the app says which
+ * one it runs from.
+ */
+function useBridgeCommand(): string {
+  const [command, setCommand] = useState(knownBridgeCommand ?? INSTALLED_BRIDGE_COMMAND);
+  useEffect(() => {
+    if (knownBridgeCommand !== undefined) return;
+    let mounted = true;
+    void loadBridgeCommand().then((loaded) => {
+      if (mounted) setCommand(loaded);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+  return command;
+}
 
 /** Copies `text` to the clipboard, and says so for a moment. */
 export function CopyButton({ text, label = "Copy", className }: { text: string; label?: string; className?: string }) {
@@ -46,7 +82,7 @@ export function CodeBlock({ text, label, className }: { text: string; label: str
 
 /** What to paste into each kind of client, for the server on `port`. */
 export function SnippetPicker({ port, token }: { port: number; token?: string }) {
-  const all = snippets(port, token);
+  const all = snippets(port, token, useBridgeCommand());
   const [id, setId] = useState<SnippetId>("claudeCode");
   const snippet = all.find((s) => s.id === id) ?? all[0];
 

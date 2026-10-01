@@ -68,15 +68,15 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const SESSION_IDLE: Duration = LONGEST_CALL.saturating_add(Duration::from_secs(60));
 
 /// `bridge` when the request comes through IdeDB's stdio bridge.
-const TRANSPORT_HEADER: &str = "x-idedb-transport";
+pub(crate) const TRANSPORT_HEADER: &str = "x-idedb-transport";
 /// The bridge process's own id, its session key.
-const BRIDGE_INSTANCE_HEADER: &str = "x-idedb-bridge-instance";
+pub(crate) const BRIDGE_INSTANCE_HEADER: &str = "x-idedb-bridge-instance";
 /// A legacy session's id.
-const SESSION_HEADER: &str = "mcp-session-id";
+pub(crate) const SESSION_HEADER: &str = "mcp-session-id";
 
 /// JSON-RPC code of a request without a valid token, from the range left
 /// to implementations.
-const UNAUTHORIZED: i32 = -32001;
+pub(crate) const UNAUTHORIZED: i32 = -32001;
 
 const MISSING_TOKEN: &str = "IdeDB's MCP server needs a client token, sent as `Authorization: Bearer idedb_…`. \
                              The user creates clients and their tokens in IdeDB.";

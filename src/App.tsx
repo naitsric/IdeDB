@@ -8,6 +8,9 @@ import { guardWindowClose } from "./db/transactions";
 import { DataSourceDialog } from "./dialogs/DataSourceDialog";
 import { PageSizeDialog } from "./dialogs/PageSizeDialog";
 import { PasswordPrompt } from "./dialogs/PasswordPrompt";
+import { ApprovalDialog } from "./mcp/ApprovalDialog";
+import { McpDialogs } from "./mcp/McpDialogs";
+import { initMcp } from "./mcp/store";
 import { useNativeMenu } from "./menu/nativeMenu";
 import { StatusBar } from "./workbench/StatusBar";
 import { TitleBar } from "./workbench/TitleBar";
@@ -20,6 +23,7 @@ export default function App() {
 
   useEffect(registerAppCommands, []);
   useEffect(guardWindowClose, []);
+  useEffect(initMcp, []);
   useEffect(() => {
     void useDataSources.getState().load();
   }, []);
@@ -36,6 +40,9 @@ export default function App() {
       <DataSourceDialog />
       <PasswordPrompt />
       <PageSizeDialog />
+      <McpDialogs />
+      {/* Last, so it stays above any other dialog. */}
+      <ApprovalDialog />
     </div>
   );
 }

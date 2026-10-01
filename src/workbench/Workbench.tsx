@@ -10,10 +10,13 @@ import {
 } from "dockview-react";
 import type { FunctionComponent } from "react";
 import { useConsoles } from "../db/consoles";
+import { McpPanel } from "../mcp/McpPanel";
+import { setMcpTab, type McpTab } from "../mcp/store";
 import {
   attachDockview,
   closeConsole,
   EXPLORER_PANEL_ID,
+  MCP_PANEL_ID,
   showConsole,
   useWorkbench,
   WELCOME_PANEL_ID,
@@ -35,6 +38,7 @@ const components: Record<string, FunctionComponent<IDockviewPanelProps<any>>> = 
   explorer: ExplorerPanel,
   console: ConsolePanel,
   welcome: WelcomePanel,
+  mcp: McpPanel,
 };
 
 /**
@@ -81,6 +85,23 @@ export function addExplorer(dockview: DockviewApi) {
   });
 }
 
+/** The MCP tool window, below the editor area like an IDE's bottom tool windows. */
+function addMcp(dockview: DockviewApi) {
+  const anchor = editorAnchor(dockview);
+  const explorer = dockview.getPanel(EXPLORER_PANEL_ID);
+  return dockview.addPanel({
+    id: MCP_PANEL_ID,
+    component: "mcp",
+    title: "MCP",
+    position: anchor
+      ? { referencePanel: anchor, direction: "below" }
+      : explorer
+        ? { referencePanel: explorer, direction: "right" }
+        : undefined,
+    initialHeight: 340,
+  });
+}
+
 function defaultLayout(dockview: DockviewApi) {
   addWelcome(dockview);
   addExplorer(dockview);
@@ -97,6 +118,22 @@ export function toggleExplorer() {
   else panel.api.setActive();
 }
 
+/** The MCP tool window, toggled like {@link toggleExplorer}. */
+export function toggleMcp() {
+  if (!api) return;
+  const panel = api.getPanel(MCP_PANEL_ID);
+  if (!panel) addMcp(api).api.setActive();
+  else if (panel.api.isActive) panel.api.close();
+  else panel.api.setActive();
+}
+
+/** Opens the MCP tool window if it is closed, on `tab` when given, and gives it focus. */
+export function showMcp(tab?: McpTab) {
+  if (tab) setMcpTab(tab);
+  if (!api) return;
+  (api.getPanel(MCP_PANEL_ID) ?? addMcp(api)).api.setActive();
+}
+
 /** Opens the Database Explorer if it is closed and gives it focus. */
 export function showExplorer() {
   if (!api) return;
@@ -106,6 +143,7 @@ export function showExplorer() {
 export function restoreDefaultLayout() {
   if (!api) return;
   api.getPanel(EXPLORER_PANEL_ID)?.api.close();
+  api.getPanel(MCP_PANEL_ID)?.api.close();
   if (!editorAnchor(api)) addWelcome(api);
   addExplorer(api);
 }

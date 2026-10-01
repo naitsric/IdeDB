@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, ComponentProps, ReactNode } from "react";
 import { twMerge } from "tailwind-merge";
 import { formatKeybinding } from "../commands/keymap";
 
@@ -23,7 +23,7 @@ export function Button({
   variant = "secondary",
   className,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
+}: ComponentProps<"button"> & { variant?: ButtonVariant }) {
   return (
     <button
       type="button"
@@ -76,6 +76,103 @@ export function StatusDot({ tone }: { tone: "success" | "warning" | "danger" | "
     idle: "bg-subtle",
   }[tone];
   return <span className={cx("inline-block size-2 shrink-0 rounded-full", color)} />;
+}
+
+/** An on/off switch, for settings that apply at once. */
+export function Switch({
+  checked,
+  onCheckedChange,
+  label,
+  disabled,
+}: {
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onCheckedChange(!checked)}
+      className={cx(
+        "relative inline-flex h-[18px] w-[30px] shrink-0 items-center rounded-full transition-colors",
+        "disabled:pointer-events-none disabled:opacity-40",
+        checked ? "bg-accent" : "bg-border-strong",
+      )}
+    >
+      <span
+        className={cx(
+          "inline-block size-[14px] rounded-full bg-white shadow-sm transition-transform",
+          checked ? "translate-x-[14px]" : "translate-x-[2px]",
+        )}
+      />
+    </button>
+  );
+}
+
+export interface SegmentOption<T extends string> {
+  value: T;
+  label: ReactNode;
+  /** Why it can't be chosen; shown as its tooltip. */
+  blocked?: string | null;
+  title?: string;
+  /** Text color while selected, e.g. `text-warning`. */
+  selectedClassName?: string;
+}
+
+/**
+ * One choice out of a few, as a row of segments. A blocked option keeps
+ * its tooltip (a disabled button would lose it) and ignores clicks.
+ */
+export function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+  disabled,
+}: {
+  value: T;
+  options: readonly SegmentOption<T>[];
+  onChange: (value: T) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={label}
+      aria-disabled={disabled || undefined}
+      className="flex shrink-0 items-center rounded-md bg-inset p-0.5 text-[11.5px]"
+    >
+      {options.map((option) => {
+        const selected = option.value === value;
+        const blocked = disabled || !!option.blocked;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            aria-disabled={blocked || undefined}
+            title={option.blocked ?? option.title}
+            onClick={() => !blocked && !selected && onChange(option.value)}
+            className={cx(
+              "h-5 rounded px-2 font-medium transition-colors",
+              selected ? cx("bg-elevated text-fg shadow-sm", option.selectedClassName) : "text-muted",
+              !selected && !blocked && "hover:text-fg",
+              blocked && !selected && "opacity-40",
+            )}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export { cx };

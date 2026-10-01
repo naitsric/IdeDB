@@ -18,6 +18,7 @@ export function attachDockview(api: DockviewApi) {
 export const consolePanelId = (consoleId: string) => `console:${consoleId}`;
 export const WELCOME_PANEL_ID = "welcome";
 export const EXPLORER_PANEL_ID = "explorer";
+export const MCP_PANEL_ID = "mcp";
 
 /** Opens a console tab next to the other consoles, or focuses it if already open. */
 export function showConsole(consoleId: string) {

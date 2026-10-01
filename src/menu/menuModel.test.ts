@@ -132,6 +132,27 @@ describe("buildMenuModel", () => {
     expect(commandIds(menu(withQuit, "Query"))).toContain("transaction.commit");
   });
 
+  it("puts the MCP tool window in View and the server's commands first in Tools", () => {
+    const withMcp = buildMenuModel([
+      ...commands,
+      command("view.toolWindow.mcp", "View", { keybinding: "$mod+Digit8" }),
+      command("mcp.toggleServer", "MCP"),
+      command("mcp.newClient", "MCP"),
+    ]);
+    const view = menu(withMcp, "View")!.items;
+    expect(view.slice(0, 2)).toEqual([
+      { kind: "command", commandId: "view.toolWindow.explorer", title: "view.toolWindow.explorer", accelerator: "CmdOrCtrl+1" },
+      { kind: "command", commandId: "view.toolWindow.mcp", title: "view.toolWindow.mcp", accelerator: "CmdOrCtrl+8" },
+    ]);
+    const tools = menu(withMcp, "Tools")!.items;
+    expect(tools.map((i) => (i.kind === "command" ? i.commandId : i.kind))).toEqual([
+      "mcp.toggleServer",
+      "mcp.newClient",
+      "separator",
+      "brand.new",
+    ]);
+  });
+
   it("ends with Window and a Help link to the repository", () => {
     expect(menu(menus, "Window")!.items.map((i) => (i.kind === "predefined" ? i.name : i.kind))).toEqual([
       "minimize",

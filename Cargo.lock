@@ -1714,6 +1714,7 @@ version = "0.1.2"
 dependencies = [
  "idedb-core",
  "idedb-drivers",
+ "idedb-mcp",
  "idedb-store",
  "rmp-serde",
  "serde",

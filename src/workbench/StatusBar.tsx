@@ -1,6 +1,7 @@
 import { isRunning, useConsoles } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { useTransactions } from "../db/transactions";
+import { McpStatusItem } from "../mcp/McpStatusItem";
 import { ENGINE_LABEL } from "../ui/EngineIcon";
 import { cx, StatusDot } from "../ui/primitives";
 import { useWorkbench } from "./bridge";
@@ -28,7 +29,8 @@ export function StatusBar() {
         </span>
       )}
       <span className="ml-auto flex items-center gap-3">
-        {mode && <span title="Transaction mode of the active console">Tx: {mode === "manual" ? "Manual" : "Auto"}</span>}
+        <McpStatusItem />
+        {mode &&<span title="Transaction mode of the active console">Tx: {mode === "manual" ? "Manual" : "Auto"}</span>}
         {server && (
           <span>
             {ENGINE_LABEL[server.engine]} {server.version}

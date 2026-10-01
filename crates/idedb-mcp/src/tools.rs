@@ -361,9 +361,9 @@ impl McpServer {
     }
 
     /// Runs a statement: a read right away, a write once the user approves
-    /// it. `progress` is called every 15 s while it waits for the user;
-    /// `cancel` (or dropping the future) withdraws it, or stops it once
-    /// running.
+    /// it. `progress` is called every 15 s while it waits for the user, and
+    /// never after this returns; `cancel` (or dropping the future) withdraws
+    /// it, or stops it once running.
     pub async fn execute(
         &self,
         caller: &Caller,
@@ -722,6 +722,9 @@ impl Core {
             Answer::Revoked => Some(
                 "This client's access was revoked in IdeDB before the user answered; the statement did not run."
                     .to_owned(),
+            ),
+            Answer::Stopped => Some(
+                "IdeDB's MCP server was stopped before the user answered; the statement did not run.".to_owned(),
             ),
         };
         if let Some(message) = refused {

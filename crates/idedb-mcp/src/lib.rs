@@ -1,8 +1,9 @@
-//! The core of IdeDB's MCP server: the tools an MCP client (an LLM) calls
-//! to read the user's databases through IdeDB, who may call them, and the
-//! audit trail they leave. No transport here: an adapter (rmcp over HTTP)
-//! authenticates each request into a [`Caller`] and calls the tool methods
-//! of [`McpServer`], which are plain async functions.
+//! IdeDB's MCP server: the tools an MCP client (an LLM) calls to read the
+//! user's databases through IdeDB, who may call them, and the audit trail
+//! they leave. The tools are plain async methods of [`McpServer`]; the
+//! transport ([`McpServer::start`]: MCP's Streamable HTTP on loopback, with
+//! the official SDK, rmcp) is a thin adapter that authenticates each request
+//! into a [`Caller`] and calls them.
 //!
 //! What stands between a client and a database, in order:
 //! - **Token.** [`McpServer::authenticate`] looks the token's hash up in the
@@ -25,6 +26,8 @@
 //! read-only database user is what finally limits it.
 
 mod approvals;
+mod handler;
+mod http;
 mod output;
 mod pool;
 mod run;
@@ -44,6 +47,7 @@ use tokio::time::Instant;
 
 pub use approvals::{ApprovalRequest, Progress};
 pub use idedb_store::{AuditEntry, Decision, Transport};
+pub use self::http::{MCP_PATH, ServerStatus, StartError};
 pub use output::INSTRUCTIONS;
 pub use settings::{MAX_ROWS, McpSettings};
 pub use token::{hash_token, new_token};
@@ -78,6 +82,8 @@ pub trait Host: Send + Sync + 'static {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum McpEvent {
+    /// The server started or stopped listening, or failed to start.
+    Status(ServerStatus),
     /// A tool call was recorded in the audit log.
     Audit(AuditEntry),
     /// A write waits for the user; answer with [`McpServer::answer_approval`].
@@ -168,6 +174,8 @@ pub(crate) struct Core {
     approvals: Approvals,
     /// When each client was last written as seen, and what it declared.
     seen: Mutex<HashMap<String, Seen>>,
+    /// The HTTP listener and its status.
+    listener: http::Listener,
 }
 
 struct Seen {
@@ -177,11 +185,19 @@ struct Seen {
 
 impl McpServer {
     pub fn new(host: Arc<dyn Host>) -> Self {
-        Self::with_pool(host, Pool::default())
+        Self::with_parts(host, Pool::default(), Approvals::default())
     }
 
-    fn with_pool(host: Arc<dyn Host>, pool: Pool) -> Self {
-        Self(Arc::new(Core { host, pool, approvals: Approvals::default(), seen: Mutex::default() }))
+    /// A server whose waiting writes report progress every `every` rather
+    /// than every 15 s, for tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_progress_every(host: Arc<dyn Host>, every: Duration) -> Self {
+        Self::with_parts(host, Pool::default(), Approvals::new(every))
+    }
+
+    fn with_parts(host: Arc<dyn Host>, pool: Pool, approvals: Approvals) -> Self {
+        let listener = http::Listener::default();
+        Self(Arc::new(Core { host, pool, approvals, seen: Mutex::default(), listener }))
     }
 
     /// The stored settings, defaults for what is missing.
@@ -190,8 +206,8 @@ impl McpServer {
     }
 
     /// Validates and stores the settings. Tool calls use them from the next
-    /// call on; starting, stopping or moving the listener is the
-    /// transport's job.
+    /// call on; a new port takes effect when [`start`](Self::start) is
+    /// called again.
     pub fn save_settings(&self, settings: &McpSettings) -> Result<(), Error> {
         settings::save(self.0.host.store(), settings)
     }

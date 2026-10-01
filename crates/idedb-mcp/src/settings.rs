@@ -15,6 +15,10 @@ const MAX_SECS: u64 = 3600;
 /// Longest write timeout: approved schema changes on big tables take long.
 const MAX_WRITE_SECS: u64 = 24 * 3600;
 
+/// The longest a tool call can take: the longest wait for approval, then
+/// the longest approved write.
+pub(crate) const LONGEST_CALL: Duration = Duration::from_secs(MAX_SECS + MAX_WRITE_SECS);
+
 const KEY: &str = "mcp";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

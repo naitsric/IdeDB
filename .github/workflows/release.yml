@@ -3,7 +3,7 @@
 #
 # 1. prepare (Linux): bumps the version (scripts/release-version.mjs),
 #    commits "Release vX.Y.Z" to main and tags it.
-# 2. macos, linux: bundle the tag side by side, IdeDB.app and a .dmg on
+# 2. macos, linux: bundle the tag in parallel, IdeDB.app and a .dmg on
 #    macOS, a .deb, an .rpm and an AppImage on Linux, and upload them as
 #    workflow artifacts. `platforms` leaves one of them out.
 # 3. publish (Linux): puts every bundle in one GitHub Release.

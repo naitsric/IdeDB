@@ -1,6 +1,7 @@
 mod data_sources;
 mod error;
 mod export;
+mod mcp;
 mod menu;
 mod sessions;
 
@@ -41,6 +42,8 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             app.manage(Store::open(&dir.join("idedb.db"))?);
             app.manage(Secrets(secret_store(app)));
+            // After the store and secrets: the MCP server reads both.
+            mcp::setup(app.handle());
             Ok(())
         })
         .manage(sessions::Sessions::default())
@@ -65,6 +68,22 @@ pub fn run() {
             export::export_begin,
             export::export_write,
             export::export_finish,
+            mcp::mcp_status,
+            mcp::mcp_settings_get,
+            mcp::mcp_settings_save,
+            mcp::mcp_clients_list,
+            mcp::mcp_client_create,
+            mcp::mcp_client_rename,
+            mcp::mcp_client_rotate,
+            mcp::mcp_client_revoke,
+            mcp::mcp_client_delete,
+            mcp::mcp_grants_set,
+            mcp::mcp_never_write_list,
+            mcp::mcp_never_write_set,
+            mcp::mcp_audit_list,
+            mcp::mcp_approval_answer,
+            mcp::mcp_approvals_pending,
+            mcp::mcp_endpoint,
             menu::menu_set,
             app_quit,
         ])

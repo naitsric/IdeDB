@@ -9,6 +9,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::CommandResult;
+use crate::mcp::McpState;
 use crate::sessions::Sessions;
 
 pub struct Secrets(pub Box<dyn SecretStore>);
@@ -22,13 +23,15 @@ pub async fn data_sources_list(store: State<'_, Store>) -> CommandResult<Vec<Dat
 }
 
 /// `password`: `None` keeps whatever is stored; `Some` replaces it (an
-/// empty string stores an empty password).
+/// empty string stores an empty password). The MCP server's sessions on the
+/// data source close, so its next calls connect with what was saved.
 #[tauri::command]
 pub async fn data_source_save(
     source: DataSource,
     password: Option<String>,
     store: State<'_, Store>,
     secrets: State<'_, Secrets>,
+    mcp: State<'_, McpState>,
 ) -> CommandResult<DataSource> {
     let saved = store.save(source)?;
     if !saved.save_password {
@@ -36,6 +39,7 @@ pub async fn data_source_save(
     } else if let Some(password) = password {
         secrets.0.set(&saved.id, &password)?;
     }
+    mcp.0.close_data_source(&saved.id).await;
     Ok(saved)
 }
 
@@ -45,8 +49,10 @@ pub async fn data_source_delete(
     store: State<'_, Store>,
     secrets: State<'_, Secrets>,
     sessions: State<'_, Sessions>,
+    mcp: State<'_, McpState>,
 ) -> CommandResult<()> {
     sessions.close_data_source(&id).await;
+    mcp.0.close_data_source(&id).await;
     store.delete(&id)?;
     secrets.0.delete(&id)?;
     Ok(())

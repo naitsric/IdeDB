@@ -1,10 +1,37 @@
 import { useEffect } from "react";
 import { tinykeys } from "tinykeys";
 import { noteKeyboardRun } from "../menu/nativeMenu";
-import { executeCommand, focusContext, pickCommand, useCommands, type Command } from "./registry";
+import { keymapHeld } from "./keymapHold";
+import { executeCommand, focusContext, pickCommand, useCommands, type Command, type FocusContext } from "./registry";
 
 /** Max gap between the two Shift taps of "Shift Shift", as in IntelliJ. */
 const DOUBLE_SHIFT_MS = 350;
+
+/**
+ * What a key bound to `candidates` does: run one of them, do nothing at
+ * all, or go to whoever else handles it.
+ *
+ * - The command `pickCommand` chooses runs and consumes the key. Without
+ *   an enabled one, the key passes untouched.
+ * - While a dialog holds the keymap (see keymapHold.ts) nothing runs. A
+ *   key bound where focus is (globally, or to its context) is suppressed,
+ *   enabled or not: its default action is prevented, so ⌘⏎ can't press
+ *   the dialog's focused button either, though the dialog's handlers still
+ *   see it. Keys bound only to other contexts pass, so ⌘C still copies
+ *   text in the dialog.
+ */
+export function resolveKey(
+  candidates: readonly Command[],
+  context: FocusContext | undefined,
+  held: boolean,
+): { action: "run"; command: Command } | { action: "suppress" } | { action: "pass" } {
+  if (held) {
+    const bound = candidates.some((c) => c.context === undefined || c.context === context);
+    return bound ? { action: "suppress" } : { action: "pass" };
+  }
+  const command = pickCommand(candidates, context);
+  return command ? { action: "run", command } : { action: "pass" };
+}
 
 /**
  * Binds every registered command's keybinding on the window, in the capture
@@ -16,7 +43,7 @@ const DOUBLE_SHIFT_MS = 350;
  * Several commands may share a key (see `pickCommand`). The one that runs
  * consumes the key (no default action, no propagation), so e.g. ⌘⏎ never
  * also inserts a newline in the editor; when none is enabled, the key goes
- * to whoever else handles it.
+ * to whoever else handles it. Nothing runs while a dialog holds the keymap.
  */
 export function useKeymap(onDoubleShift: () => void) {
   const commands = useCommands((s) => s.commands);
@@ -30,12 +57,13 @@ export function useKeymap(onDoubleShift: () => void) {
       [...byBinding].map(([binding, candidates]) => [
         binding,
         (event: KeyboardEvent) => {
-          const command = pickCommand(candidates, focusContext());
-          if (!command) return;
+          const resolved = resolveKey(candidates, focusContext(), keymapHeld());
+          if (resolved.action === "pass") return;
           event.preventDefault();
+          if (resolved.action === "suppress") return;
           event.stopPropagation();
-          noteKeyboardRun(command.id);
-          executeCommand(command.id);
+          noteKeyboardRun(resolved.command.id);
+          executeCommand(resolved.command.id);
         },
       ]),
     );
@@ -45,7 +73,7 @@ export function useKeymap(onDoubleShift: () => void) {
     });
   }, [commands]);
 
-  useEffect(() => detectDoubleShift(onDoubleShift), [onDoubleShift]);
+  useEffect(() => detectDoubleShift(() => !keymapHeld() && onDoubleShift()), [onDoubleShift]);
 }
 
 /** Fires on two bare Shift taps in quick succession, with no other key in between. */

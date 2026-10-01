@@ -11,6 +11,11 @@ export function serverState(status: ServerStatus, enabled: boolean): { tone: Ton
   return { tone: "idle", label: "Off" };
 }
 
+/** Off because the user turned it off: not running, not starting, not failed. */
+export function serverIsOff(status: ServerStatus, enabled: boolean): boolean {
+  return !status.running && !status.error && !enabled;
+}
+
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /** The status bar's MCP item: its text, tooltip and dot. */

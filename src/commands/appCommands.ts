@@ -46,7 +46,7 @@ import { activeGrid, selectedRows, toggleValueViewer, useGrids } from "../grid/d
 import { openNewClient, showApprovals, toggleServer, useMcp } from "../mcp/store";
 import { useTheme, useTranslucentSidebar } from "../theme";
 import { closeActivePanel, hasActivePanel, useWorkbench } from "../workbench/bridge";
-import { restoreDefaultLayout, showExplorer, toggleExplorer, toggleMcp } from "../workbench/Workbench";
+import { restoreDefaultLayout, showExplorer, showMcp, toggleExplorer, toggleMcp } from "../workbench/Workbench";
 import { useHistoryPalette } from "./HistoryPalette";
 import { registerCommands, type Command } from "./registry";
 import { useSearchEverywhere } from "./SearchEverywhere";
@@ -565,6 +565,13 @@ export function registerAppCommands(): () => void {
       category: "MCP",
       keywords: ["add", "token", "claude", "cursor", "ai", "llm", "agent"],
       run: openNewClient,
+    },
+    {
+      id: "mcp.showActivity",
+      title: "Show MCP Activity",
+      category: "MCP",
+      keywords: ["audit", "log", "history", "queries", "statements", "ai", "llm", "agent"],
+      run: () => showMcp("activity"),
     },
     {
       id: "mcp.showApprovals",

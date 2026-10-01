@@ -63,8 +63,8 @@ src/                 React UI
                      editor: filters, pending changes, copy/export, value viewer
   db/                typed IPC with the Rust core; data source, console, transaction
                      and result-paging state
-  mcp/               the MCP server's UI: clients and grants, server settings, the
-                     approval dialog, connection snippets
+  mcp/               the MCP server's UI: the activity log, clients and grants, server
+                     settings, the approval dialog, connection snippets
 src-tauri/           Tauri app: commands exposed to the UI, menu, the MCP server's host
 crates/
   idedb-core/           engine-agnostic types, the Session trait, conformance tests
@@ -130,9 +130,12 @@ by `src-tauri/src/mcp.rs`, which relays its events to the UI as
 client has its own token, shown once, and per data source access: read, or
 write. Reads run on read-only sessions; every write waits for the user in the
 approval dialog, which is built not to be answered by accident: Reject has
-the focus, Enter never approves, and Approve unlocks 800 ms after a request
-shows, the window comes forward or the user stops typing. Every call lands
-in the audit log.
+the focus, Enter never approves, Approve unlocks 800 ms after a request
+shows, the window comes forward or the user stops typing, and while it shows
+it holds the keymap (`src/commands/keymapHold.ts`): no shortcut, menu
+command or Shift Shift acts behind it. Every call lands in the audit log,
+which the tool window's Activity tab shows live, with filters, each call's
+details and "Open in Console".
 
 **Translucent sidebar.** The window is transparent over the sidebar material,
 and only the explorer and title bar let it through. This uses Tauri's

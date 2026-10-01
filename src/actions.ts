@@ -33,12 +33,13 @@ export function editDataSource(sourceId: string) {
   if (source) useDialogs.getState().openDataSource(source);
 }
 
-export function newConsole(sourceId = contextDataSourceId()) {
+/** Opens a new console on a data source, with `sql` in its editor (not run). */
+export function newConsole(sourceId = contextDataSourceId(), sql?: string) {
   if (!sourceId) {
     createDataSource();
     return;
   }
-  showConsole(useConsoles.getState().create(sourceId));
+  showConsole(useConsoles.getState().create(sourceId, sql));
 }
 
 /**

@@ -1,5 +1,6 @@
 import { Check, ChevronLeft, ChevronRight, Clock, ShieldCheck, TriangleAlert } from "lucide-react";
 import { useEffect, useLayoutEffect, useReducer, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useKeymapHold } from "../commands/keymapHold";
 import { useDataSources } from "../db/dataSources";
 import { SqlViewer } from "../editor/SqlViewer";
 import { EngineIcon } from "../ui/EngineIcon";
@@ -29,6 +30,9 @@ const URGENT_MS = 15_000;
  * - Escape (and Later) puts the dialog aside without answering: the
  *   requests keep waiting until they expire, and the status bar's badge,
  *   or the next request, brings it back. A click outside does nothing.
+ * - While it shows, it holds the keymap (see keymapHold.ts): no shortcut
+ *   or menu command acts behind it, so ⌘⏎ meant for the console runs
+ *   nothing.
  */
 export function ApprovalDialog() {
   const approvals = useMcp((s) => s.approvals);
@@ -39,6 +43,7 @@ export function ApprovalDialog() {
 }
 
 function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; index: number; total: number }) {
+  useKeymapHold();
   const source = useDataSources((s) => s.sources.find((x) => x.id === request.dataSourceId));
   const now = useNow(1000);
   const [gate, setGate] = useState(closedGate);

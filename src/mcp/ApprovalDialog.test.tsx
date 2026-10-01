@@ -18,6 +18,8 @@ vi.mock("./api", async (importOriginal) => ({
 
 // Imported after the mock.
 const { ApprovalDialog } = await import("./ApprovalDialog");
+const { useKeymap } = await import("../commands/keymap");
+const { registerCommands } = await import("../commands/registry");
 const { addRequest, APPROVE_DELAY_MS, emptyQueue } = await import("./approvalsQueue");
 const { useMcp } = await import("./store");
 
@@ -174,5 +176,67 @@ describe("ApprovalDialog", () => {
     await wait(ARMED);
     await click(button("Approve"));
     expect(answered).toEqual([[2, true]]);
+  });
+});
+
+describe("shortcuts behind the dialog", () => {
+  const ran: string[] = [];
+  let keymapRoot: Root;
+  let unregister: () => void;
+
+  function KeymapHost() {
+    useKeymap(() => ran.push("searchEverywhere"));
+    return null;
+  }
+
+  /** `$mod` is ⌘ on macOS and Ctrl elsewhere, as tinykeys reads the platform (happy-dom says Linux). */
+  const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? { metaKey: true } : { ctrlKey: true };
+
+  async function shortcut(key: string, code: string) {
+    const event = new KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true, ...mod });
+    await act(async () => {
+      (document.activeElement ?? document.body).dispatchEvent(event);
+    });
+    return event;
+  }
+
+  beforeEach(async () => {
+    ran.length = 0;
+    unregister = registerCommands([
+      {
+        id: "console.execute",
+        title: "Execute Statement",
+        category: "Console",
+        keybinding: "$mod+Enter",
+        run: () => void ran.push("console.execute"),
+      },
+      { id: "view.closeTab", title: "Close Tab", category: "Workbench", keybinding: "$mod+KeyW", run: () => void ran.push("view.closeTab") },
+    ]);
+    const host = document.createElement("div");
+    document.body.append(host);
+    keymapRoot = createRoot(host);
+    await act(async () => keymapRoot.render(<KeymapHost />));
+  });
+
+  afterEach(async () => {
+    unregister();
+    await act(async () => keymapRoot.unmount());
+  });
+
+  it("run nothing while it shows, and again once it is put aside", async () => {
+    await show(request(1));
+    // Still typing in the console it came up over, and once it is armed.
+    expect((await shortcut("Enter", "Enter")).defaultPrevented).toBe(true);
+    await wait(ARMED);
+    await shortcut("Enter", "Enter");
+    await shortcut("w", "KeyW");
+    expect(ran).toEqual([]);
+    // ⌘⏎ didn't press the focused Reject either.
+    expect(answered).toEqual([]);
+    expect(document.activeElement).toBe(button("Reject"));
+
+    await click(button("Later"));
+    await shortcut("Enter", "Enter");
+    expect(ran).toEqual(["console.execute"]);
   });
 });

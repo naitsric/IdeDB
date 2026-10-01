@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
+import { keymapHeld } from "../commands/keymapHold";
 import { executeCommand, useCommands } from "../commands/registry";
 import { buildMenuModel } from "./menuModel";
 
@@ -34,11 +35,19 @@ export function useNativeMenu() {
   }, [commands]);
 
   useEffect(() => {
-    const unlisten = listen<string>("menu-command", ({ payload: commandId }) => {
-      const ranAt = keyboardRuns.get(commandId);
-      if (ranAt !== undefined && performance.now() - ranAt < DOUBLE_FIRE_WINDOW_MS) return;
-      executeCommand(commandId);
-    });
+    const unlisten = listen<string>("menu-command", ({ payload: commandId }) => runMenuCommand(commandId));
     return () => void unlisten.then((stop) => stop());
   }, []);
+}
+
+/**
+ * Runs what the menu picked, by click or accelerator. Nothing runs while a
+ * dialog holds the keymap: AppKit knows nothing of the dialog and keeps the
+ * menu bar live, so its clicks and accelerators stop here.
+ */
+export function runMenuCommand(commandId: string) {
+  if (keymapHeld()) return;
+  const ranAt = keyboardRuns.get(commandId);
+  if (ranAt !== undefined && performance.now() - ranAt < DOUBLE_FIRE_WINDOW_MS) return;
+  executeCommand(commandId);
 }

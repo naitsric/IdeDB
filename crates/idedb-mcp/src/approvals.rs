@@ -1,6 +1,6 @@
 //! Writes waiting for the user: each one is announced to the UI, then waits
-//! for an answer, a timeout, its caller to go away, or its client to be
-//! revoked.
+//! for an answer, a timeout, its caller to go away, its client to be
+//! revoked, or the server to stop.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -66,6 +66,8 @@ pub(crate) enum Answer {
     Cancelled,
     /// The client was revoked or deleted.
     Revoked,
+    /// The server stopped listening.
+    Stopped,
 }
 
 impl Answer {
@@ -74,30 +76,41 @@ impl Answer {
             Answer::Approved => Decision::Approved,
             Answer::Rejected => Decision::Rejected,
             Answer::Timeout => Decision::Timeout,
-            Answer::Cancelled | Answer::Revoked => Decision::Withdrawn,
+            Answer::Cancelled | Answer::Revoked | Answer::Stopped => Decision::Withdrawn,
         }
     }
 }
 
-#[derive(Default)]
 pub(crate) struct Approvals {
     next_id: AtomicU64,
     pending: Mutex<BTreeMap<u64, Pending>>,
+    /// [`PROGRESS_EVERY`], shorter in some tests.
+    progress_every: Duration,
+}
+
+impl Default for Approvals {
+    fn default() -> Self {
+        Self::new(PROGRESS_EVERY)
+    }
 }
 
 struct Pending {
     request: ApprovalRequest,
-    answer: oneshot::Sender<bool>,
+    answer: oneshot::Sender<Answer>,
 }
 
 impl Approvals {
+    pub fn new(progress_every: Duration) -> Self {
+        Self { next_id: AtomicU64::default(), pending: Mutex::default(), progress_every }
+    }
+
     pub fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     pub fn answer(&self, id: u64, approve: bool) -> bool {
         let Some(pending) = self.pending.lock().unwrap().remove(&id) else { return false };
-        pending.answer.send(approve).is_ok()
+        pending.answer.send(if approve { Answer::Approved } else { Answer::Rejected }).is_ok()
     }
 
     pub fn pending(&self) -> Vec<ApprovalRequest> {
@@ -114,9 +127,21 @@ impl Approvals {
         ids.iter().filter_map(|id| pending.remove(id)).count()
     }
 
+    /// Withdraws every pending approval, the server having stopped: each of
+    /// their waits ends as [`Answer::Stopped`]. Returns how many there were.
+    pub fn withdraw_all(&self) -> usize {
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap());
+        let count = pending.len();
+        for (_, pending) in pending {
+            let _ = pending.answer.send(Answer::Stopped);
+        }
+        count
+    }
+
     /// Registers `request`, announces it, and waits for the user's answer,
     /// at most `timeout`, reporting `progress` every 15 s. `cancel`
-    /// withdraws it, and so does [`withdraw_client`](Self::withdraw_client).
+    /// withdraws it, and so do [`withdraw_client`](Self::withdraw_client)
+    /// and [`withdraw_all`](Self::withdraw_all).
     ///
     /// `client_active` is asked once the request is registered, before it
     /// is announced: a client revoked just before then would otherwise
@@ -144,17 +169,14 @@ impl Approvals {
         let started = Instant::now();
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
-        let mut ticks = tokio::time::interval_at(started + PROGRESS_EVERY, PROGRESS_EVERY);
+        let every = self.progress_every;
+        let mut ticks = tokio::time::interval_at(started + every, every);
         let answer = loop {
             tokio::select! {
                 // An answer that arrives with the deadline still counts.
                 biased;
-                answer = &mut answered => break match answer {
-                    Ok(true) => Answer::Approved,
-                    Ok(false) => Answer::Rejected,
-                    // Only `withdraw_client` drops the sender unanswered.
-                    Err(_) => Answer::Revoked,
-                },
+                // Only `withdraw_client` drops the sender unanswered.
+                answer = &mut answered => break answer.unwrap_or(Answer::Revoked),
                 () = &mut deadline => break Answer::Timeout,
                 () = cancel.cancelled() => break Answer::Cancelled,
                 _ = ticks.tick() => {
@@ -249,6 +271,27 @@ mod tests {
         assert_eq!(approvals.pending().iter().map(|r| r.id).collect::<Vec<_>>(), [3]);
         assert!(approvals.answer(3, false));
         assert_eq!(other.await, Answer::Rejected);
+    }
+
+    #[tokio::test]
+    async fn withdrawing_all_ends_every_wait_as_stopped() {
+        let host = TestHost::new();
+        let approvals = Approvals::default();
+        let cancel = CancellationToken::new();
+        let wait = |id, client| {
+            approvals.wait(&*host, request(id, client), Duration::from_secs(60), &cancel, &|_| {}, &|| true)
+        };
+        let (mut first, mut other) = (Box::pin(wait(1, "c1")), Box::pin(wait(2, "c2")));
+        for waiting in [&mut first, &mut other] {
+            assert!(futures_poll(waiting).is_none());
+        }
+
+        assert_eq!(approvals.withdraw_all(), 2);
+        assert_eq!((first.await, other.await), (Answer::Stopped, Answer::Stopped));
+        assert!(approvals.pending().is_empty());
+        assert!(!approvals.answer(1, true));
+        let withdrawn = |e: &McpEvent| matches!(e, McpEvent::ApprovalResolved { decision: Decision::Withdrawn, .. });
+        assert_eq!(host.events().iter().filter(|e| withdrawn(e)).count(), 2);
     }
 
     /// Polls a future once.

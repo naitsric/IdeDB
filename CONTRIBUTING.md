@@ -65,8 +65,7 @@ src/                 React UI
                      and result-paging state
   mcp/               the MCP server's UI: clients and grants, server settings, the
                      approval dialog, connection snippets
-src-tauri/           Tauri app: commands exposed to the UI, menu, the MCP server's host, and
-                     `idedb mcp-bridge` (src/main.rs)
+src-tauri/           Tauri app: commands exposed to the UI, menu, the MCP server's host
 crates/
   idedb-core/           engine-agnostic types, the Session trait, conformance tests
   idedb-driver-pg/      PostgreSQL (tokio-postgres)
@@ -74,7 +73,7 @@ crates/
   idedb-driver-sqlite/  SQLite (rusqlite, bundled)
   idedb-drivers/        dispatch over the drivers (AnySession), opening a saved data source
   idedb-mcp/            MCP server core: tools, grants, approvals, pooled read-only sessions, audit;
-                        its HTTP transport, and the stdio bridge to it (feature `bridge`)
+                        its HTTP transport, and the stdio bridge to it (`idedb mcp-bridge`)
   idedb-sql/            SQL statement classifier for the MCP server: read, write or forbidden
   idedb-store/          data sources and query history (local SQLite), passwords (Keychain)
 ```

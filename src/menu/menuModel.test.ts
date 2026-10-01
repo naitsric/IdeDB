@@ -138,6 +138,8 @@ describe("buildMenuModel", () => {
       command("view.toolWindow.mcp", "View", { keybinding: "$mod+Digit8" }),
       command("mcp.toggleServer", "MCP"),
       command("mcp.newClient", "MCP"),
+      command("mcp.showActivity", "MCP"),
+      command("mcp.showApprovals", "MCP"),
     ]);
     const view = menu(withMcp, "View")!.items;
     expect(view.slice(0, 2)).toEqual([
@@ -148,6 +150,8 @@ describe("buildMenuModel", () => {
     expect(tools.map((i) => (i.kind === "command" ? i.commandId : i.kind))).toEqual([
       "mcp.toggleServer",
       "mcp.newClient",
+      "mcp.showActivity",
+      "mcp.showApprovals",
       "separator",
       "brand.new",
     ]);

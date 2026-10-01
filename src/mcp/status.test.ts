@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ServerStatus } from "./api";
-import { approvalsBadge, serverState, statusBarItem } from "./status";
+import { approvalsBadge, serverIsOff, serverState, statusBarItem } from "./status";
 
 const off: ServerStatus = { running: false, port: null, url: null, error: null };
 const running: ServerStatus = { running: true, port: 7412, url: "http://127.0.0.1:7412/mcp", error: null };
@@ -29,6 +29,15 @@ describe("statusBarItem", () => {
     const error = statusBarItem(failed, true, 0);
     expect(error).toMatchObject({ tone: "danger", text: "MCP error" });
     expect(error.title).toContain("already in use");
+  });
+});
+
+describe("serverIsOff", () => {
+  it("is off only when turned off, not while starting or after failing", () => {
+    expect(serverIsOff(off, false)).toBe(true);
+    expect(serverIsOff(off, true)).toBe(false);
+    expect(serverIsOff(failed, true)).toBe(false);
+    expect(serverIsOff(running, true)).toBe(false);
   });
 });
 

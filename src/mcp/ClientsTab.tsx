@@ -1,4 +1,4 @@
-import { Ban, Bot, CircleAlert, Lock, LockOpen, Pencil, Plus, Power, RotateCw, Trash2 } from "lucide-react";
+import { Activity, Ban, Bot, Lock, LockOpen, Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { editDataSource } from "../actions";
 import { executeCommand } from "../commands/registry";
@@ -22,18 +22,17 @@ import { SnippetPicker } from "./SnippetPicker";
 import { TOKEN_PLACEHOLDER } from "./snippets";
 import {
   deleteClient,
-  loadMcp,
   openNewClient,
   openRename,
   regenerateToken,
   revokeClient,
   selectClient,
   setAccess,
-  setMcpTab,
   setNeverWrite,
-  toggleServer,
+  showClientActivity,
   useMcp,
 } from "./store";
+import { EmptyState, LoadErrorBanner, ServerBanner } from "./TabParts";
 
 /** How often presence ("Online", "5 min ago") is worked out again. */
 const PRESENCE_TICK_MS = 15_000;
@@ -45,7 +44,6 @@ const NEVER_WRITE_HINT =
 export function ClientsTab() {
   const clients = useMcp((s) => s.clients);
   const loaded = useMcp((s) => s.loaded);
-  const loadError = useMcp((s) => s.loadError);
   const selectedId = useMcp((s) => s.selectedClientId);
   const now = useNow(PRESENCE_TICK_MS);
   const selected = clients.find((c) => c.id === selectedId) ?? clients[0];
@@ -72,62 +70,9 @@ export function ClientsTab() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {loadError && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-danger/10 px-3 py-1.5 text-[12px] text-danger">
-          <CircleAlert className="size-3.5 shrink-0" />
-          <span className="selectable min-w-0 flex-1 truncate" title={loadError}>
-            Couldn't load the MCP server's state: {loadError}
-          </span>
-          <Button className="h-6" onClick={() => void loadMcp()}>
-            Retry
-          </Button>
-        </div>
-      )}
+      <LoadErrorBanner />
       <ServerBanner />
       {body}
-    </div>
-  );
-}
-
-/** Says when clients can't connect: the server is off or failed to start. */
-function ServerBanner() {
-  const status = useMcp((s) => s.status);
-  const enabled = useMcp((s) => s.settings?.enabled ?? false);
-  const loaded = useMcp((s) => s.loaded);
-  if (!loaded || status.running || (enabled && !status.error)) return null;
-  const failed = !!status.error;
-  return (
-    <div
-      className={cx(
-        "flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5 text-[12px]",
-        failed ? "bg-danger/10 text-danger" : "bg-inset text-muted",
-      )}
-    >
-      {failed ? <CircleAlert className="size-3.5 shrink-0" /> : <Power className="size-3.5 shrink-0" />}
-      <span className="selectable min-w-0 flex-1 truncate" title={status.error ?? undefined}>
-        {failed
-          ? `The MCP server couldn't start: ${status.error}`
-          : "The MCP server is off, so no client can connect."}
-      </span>
-      {failed ? (
-        <Button className="h-6" onClick={() => setMcpTab("server")}>
-          Server Settings
-        </Button>
-      ) : (
-        <Button className="h-6" onClick={() => void toggleServer()}>
-          Turn On
-        </Button>
-      )}
-    </div>
-  );
-}
-
-function EmptyState({ icon: Icon, title, children }: { icon: typeof Bot; title: string; children: ReactNode }) {
-  return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 overflow-y-auto p-6 text-center">
-      <Icon className="size-6 text-subtle" strokeWidth={1.5} />
-      <p className="text-[13px] font-medium text-fg">{title}</p>
-      <div className="flex max-w-[420px] flex-col items-center text-[12px] text-muted">{children}</div>
     </div>
   );
 }
@@ -237,6 +182,8 @@ function ClientRow({ client, selected, now }: { client: McpClient; selected: boo
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        <ContextMenuItem label="Show Activity" onSelect={() => showClientActivity(client.id)} />
+        <ContextMenuSeparator />
         <ContextMenuItem label="Rename…" onSelect={() => openRename(client)} />
         <ContextMenuItem label="Regenerate Token…" disabled={revoked} onSelect={() => void regenerateToken(client)} />
         <ContextMenuSeparator />
@@ -276,6 +223,9 @@ function ClientDetail({ client, now }: { client: McpClient; now: number }) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
+          <IconButton label="Show Activity" onClick={() => showClientActivity(client.id)}>
+            <Activity className="size-3.5" />
+          </IconButton>
           <IconButton label="Rename…" onClick={() => openRename(client)}>
             <Pencil className="size-3.5" />
           </IconButton>

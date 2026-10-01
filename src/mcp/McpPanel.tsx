@@ -1,23 +1,33 @@
-import { Bot, Server, type LucideIcon } from "lucide-react";
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { Activity, Bot, Server, type LucideIcon } from "lucide-react";
+import { useEffect, useRef, type ComponentType, type KeyboardEvent } from "react";
 import { cx, StatusDot } from "../ui/primitives";
+import { ActivityTab } from "./ActivityTab";
 import { ClientsTab } from "./ClientsTab";
 import { ServerTab } from "./ServerTab";
 import { serverState } from "./status";
 import { reloadClients, setMcpTab, useMcp, type McpTab } from "./store";
 
 const TABS: { id: McpTab; label: string; icon: LucideIcon }[] = [
+  { id: "activity", label: "Activity", icon: Activity },
   { id: "clients", label: "Clients", icon: Bot },
   { id: "server", label: "Server", icon: Server },
 ];
 
+const TAB_CONTENT: Record<McpTab, ComponentType> = {
+  activity: ActivityTab,
+  clients: ClientsTab,
+  server: ServerTab,
+};
+
 /**
- * The MCP tool window: who may reach the user's data sources through
- * IdeDB, with which access, and the server they reach it on.
+ * The MCP tool window: what clients do through IdeDB, who may reach the
+ * user's data sources and with which access, and the server they reach
+ * it on.
  */
 export function McpPanel() {
   const tab = useMcp((s) => s.tab);
   const tabs = useRef<HTMLDivElement>(null);
+  const Content = TAB_CONTENT[tab];
 
   // Presence moves without events in between (seen at most every 30 s).
   useEffect(() => {
@@ -63,7 +73,7 @@ export function McpPanel() {
         <ServerSummary />
       </div>
       <div id={`mcp-${tab}`} role="tabpanel" className="flex min-h-0 flex-1 flex-col">
-        {tab === "clients" ? <ClientsTab /> : <ServerTab />}
+        <Content />
       </div>
     </div>
   );

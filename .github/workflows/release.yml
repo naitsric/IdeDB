@@ -3,8 +3,14 @@
 #
 # 1. prepare (Linux): bumps the version (scripts/release-version.mjs),
 #    commits "Release vX.Y.Z" to main and tags it.
-# 2. build (macOS): bundles the tag into IdeDB.app and a .dmg and publishes
-#    them as a GitHub Release.
+# 2. macos, linux: bundle the tag in parallel, IdeDB.app and a .dmg on
+#    macOS, a .deb, an .rpm and an AppImage on Linux, and upload them as
+#    workflow artifacts. `platforms` leaves one of them out.
+# 3. publish (Linux): puts every bundle in one GitHub Release.
+#
+# A dry run commits, tags and publishes nothing: it bundles the branch it
+# runs on (any branch) at the would-be version and keeps the bundles as
+# workflow artifacts.
 #
 # Code signing and notarization turn on by themselves once the APPLE_*
 # secrets exist; until then the app is ad-hoc signed and not notarized.
@@ -18,8 +24,13 @@ on:
         type: choice
         options: [patch, minor, major]
         default: patch
+      platforms:
+        description: Platforms to bundle
+        type: choice
+        options: [all, macos, linux]
+        default: all
       target:
-        description: aarch64 (Apple Silicon) or universal (adds Intel, takes longer)
+        description: "macOS: aarch64 (Apple Silicon) or universal (adds Intel, takes longer)"
         type: choice
         options: [aarch64, universal]
         default: aarch64
@@ -28,7 +39,7 @@ on:
         type: boolean
         default: true
       dry_run:
-        description: Only build; upload the bundle as a workflow artifact without committing, tagging or releasing
+        description: Only build; upload the bundles as workflow artifacts without committing, tagging or releasing
         type: boolean
         default: false
 
@@ -50,10 +61,11 @@ jobs:
       version: ${{ steps.bump.outputs.version }}
       ref: ${{ steps.ref.outputs.ref }}
     steps:
+      # A dry run pushes nothing, so it may try a branch before it merges.
       - name: Only from main
-        if: github.ref != 'refs/heads/main'
+        if: github.ref != 'refs/heads/main' && !inputs.dry_run
         run: |
-          echo "::error::Releases are cut from main; this run is on ${GITHUB_REF}."
+          echo "::error::Releases are cut from main; this run is on ${GITHUB_REF}. Dry runs work from any branch."
           exit 1
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -95,13 +107,16 @@ jobs:
             echo "ref=v${VERSION}" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  macos:
     name: Bundle (macOS)
     needs: prepare
+    if: inputs.platforms != 'linux'
     runs-on: macos-latest
     timeout-minutes: 60
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      ad_hoc_signed: ${{ steps.signature.outputs.ad_hoc_signed }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       RUST_TARGET: ${{ inputs.target == 'universal' && 'universal-apple-darwin' || 'aarch64-apple-darwin' }}
@@ -117,7 +132,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      # A dry run builds main as it is, so apply the would-be version locally.
+      # A dry run builds the branch as it is, so apply the would-be version locally.
       - name: Apply version (dry run)
         if: ${{ inputs.dry_run }}
         run: node scripts/release-version.mjs "$VERSION"
@@ -169,6 +184,18 @@ jobs:
       - name: Build
         run: pnpm tauri build --target "$RUST_TARGET" --bundles app,dmg
 
+      # The publish job warns about the quarantine flag only for an ad-hoc
+      # signed app, so ask the bundle that ships rather than the settings.
+      - name: Check signature
+        id: signature
+        run: |
+          app="target/${RUST_TARGET}/release/bundle/macos/IdeDB.app"
+          if codesign -dv "$app" 2>&1 | grep -qx "Signature=adhoc"; then
+            echo "ad_hoc_signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ad_hoc_signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Collect artifacts
         run: |
           bundle="target/${RUST_TARGET}/release/bundle"
@@ -177,24 +204,111 @@ jobs:
           tar -czf "dist-release/IdeDB_${VERSION}_${ARCH_LABEL}.app.tar.gz" -C "$bundle/macos" IdeDB.app
           ls -lh dist-release
 
-      - name: Upload bundle (dry run)
-        if: ${{ inputs.dry_run }}
+      # A dry run keeps the bundles for a week; a release only needs them
+      # until the publish job picks them up.
+      - name: Upload bundle
         uses: actions/upload-artifact@v7
         with:
-          name: IdeDB_${{ env.VERSION }}_${{ env.ARCH_LABEL }}
+          name: IdeDB_${{ env.VERSION }}_macos_${{ env.ARCH_LABEL }}
           path: dist-release/*
-          retention-days: 7
+          retention-days: ${{ inputs.dry_run && 7 || 1 }}
+
+  linux:
+    name: Bundle (Linux)
+    needs: prepare
+    if: inputs.platforms != 'macos'
+    # An AppImage only runs where glibc is at least as new as on the machine
+    # that built it, so build on the oldest supported runner.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+      # The same list as ci.yml.
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      # A dry run builds the branch as it is, so apply the would-be version locally.
+      - name: Apply version (dry run)
+        if: ${{ inputs.dry_run }}
+        run: node scripts/release-version.mjs "$VERSION"
+      - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      # tauri.conf.json lists the macOS bundles, so name the Linux ones.
+      - name: Build
+        run: pnpm tauri build --bundles deb,rpm,appimage
+
+      - name: Collect artifacts
+        run: |
+          bundle="target/release/bundle"
+          mkdir -p dist-release
+          cp "$bundle"/deb/*.deb "dist-release/IdeDB_${VERSION}_amd64.deb"
+          cp "$bundle"/rpm/*.rpm "dist-release/IdeDB_${VERSION}_x86_64.rpm"
+          cp "$bundle"/appimage/*.AppImage "dist-release/IdeDB_${VERSION}_amd64.AppImage"
+          ls -lh dist-release
+
+      # A dry run keeps the bundles for a week; a release only needs them
+      # until the publish job picks them up.
+      - name: Upload bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: IdeDB_${{ env.VERSION }}_linux_x86_64
+          path: dist-release/*
+          retention-days: ${{ inputs.dry_run && 7 || 1 }}
+
+  publish:
+    name: Publish
+    needs: [prepare, macos, linux]
+    # A skipped build job skips this one too unless the condition checks
+    # results itself: each platform must have built, or been left out by
+    # `platforms`. A failed or cancelled build stops the release.
+    if: >-
+      !cancelled() && !inputs.dry_run
+      && needs.prepare.result == 'success'
+      && (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && inputs.platforms == 'linux'))
+      && (needs.linux.result == 'success' || (needs.linux.result == 'skipped' && inputs.platforms == 'macos'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: IdeDB_*
+          path: dist-release
+          merge-multiple: true
 
       - name: Publish GitHub Release
-        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
           DRAFT: ${{ inputs.draft }}
+          MACOS_AD_HOC_SIGNED: ${{ needs.macos.outputs.ad_hoc_signed }}
         run: |
+          ls -lh dist-release
           tag="v${VERSION}"
           {
-            if [ "$APPLE_SIGNING_IDENTITY" = "-" ]; then
-              echo "> **Unsigned build.** macOS will refuse to open it until you remove the quarantine flag:"
+            if [ "$MACOS_AD_HOC_SIGNED" = "true" ]; then
+              echo "> **Unsigned macOS build.** macOS will refuse to open it until you remove the quarantine flag:"
               echo "> \`xattr -dr com.apple.quarantine /Applications/IdeDB.app\`"
               echo
             fi
@@ -203,6 +317,7 @@ jobs:
           draft_flag=()
           [ "$DRAFT" = "true" ] && draft_flag=(--draft)
           gh release create "$tag" dist-release/* \
+            --repo "$GITHUB_REPOSITORY" \
             --title "IdeDB ${VERSION}" \
             --notes-file release-notes.md \
             --verify-tag \

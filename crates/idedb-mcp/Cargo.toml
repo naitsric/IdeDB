@@ -1,12 +1,15 @@
 [package]
 name = "idedb-mcp"
-description = "IdeDB's MCP server: tools, grants, approvals, pooled sessions and the audit log, served over Streamable HTTP"
+description = "IdeDB's MCP server: tools, grants, approvals, pooled sessions and the audit log, served over Streamable HTTP, and the stdio bridge to it"
 version.workspace = true
 edition.workspace = true
 
 [features]
 # `idedb_mcp::testing`: a Host for tests, here and in the transport's tests.
 testing = []
+# `idedb_mcp::bridge`: the stdio bridge (`idedb mcp-bridge`), an MCP client
+# of the HTTP server for MCP clients that only launch stdio servers.
+bridge = ["dep:reqwest", "dep:uuid", "tokio/io-std", "tokio/io-util"]
 
 [dependencies]
 axum.workspace = true
@@ -18,6 +21,9 @@ idedb-core.workspace = true
 idedb-drivers.workspace = true
 idedb-sql.workspace = true
 idedb-store.workspace = true
+# The bridge's HTTP client. No TLS and no system proxy: the server is on
+# loopback.
+reqwest = { version = "0.13", default-features = false, optional = true }
 rmcp = { workspace = true, features = ["server", "macros", "transport-streamable-http-server"] }
 schemars.workspace = true
 serde.workspace = true
@@ -26,10 +32,11 @@ sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
+uuid = { workspace = true, features = ["v4"], optional = true }
 
 [dev-dependencies]
-# Itself with `testing`, for the integration tests in tests/.
-idedb-mcp = { path = ".", features = ["testing"] }
+# Itself with `testing` and `bridge`, for the integration tests in tests/.
+idedb-mcp = { path = ".", features = ["testing", "bridge"] }
 # An MCP client over Streamable HTTP, and plain HTTP for what no MCP client
 # sends. No TLS and no system proxy: the server is on loopback.
 reqwest = { version = "0.13", default-features = false }

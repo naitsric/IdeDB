@@ -166,6 +166,17 @@ export interface ClientWithToken {
   token: string;
 }
 
+/** Where clients reach the server. */
+export interface Endpoint {
+  /** The port it listens on, else the saved one, e.g. `http://127.0.0.1:7412/mcp`. */
+  url: string;
+  /**
+   * The executable stdio-only clients (Claude Desktop) run as `<it> mcp-bridge`: the one the app runs
+   * from, so a dev build names the dev binary. Null when the app can't tell.
+   */
+  bridgeCommand: string | null;
+}
+
 export const mcpApi = {
   status: () => invoke<ServerStatus>("mcp_status"),
 
@@ -205,5 +216,5 @@ export const mcpApi = {
   /** Oldest first. */
   pendingApprovals: () => invoke<ApprovalRequest[]>("mcp_approvals_pending"),
 
-  endpoint: () => invoke<{ url: string }>("mcp_endpoint"),
+  endpoint: () => invoke<Endpoint>("mcp_endpoint"),
 };

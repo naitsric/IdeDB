@@ -72,7 +72,8 @@ crates/
   idedb-driver-mysql/   MySQL (mysql_async)
   idedb-driver-sqlite/  SQLite (rusqlite, bundled)
   idedb-drivers/        dispatch over the drivers (AnySession), opening a saved data source
-  idedb-mcp/            MCP server core: tools, grants, approvals, pooled read-only sessions, audit
+  idedb-mcp/            MCP server core: tools, grants, approvals, pooled read-only sessions, audit;
+                        its HTTP transport, and the stdio bridge to it (`idedb mcp-bridge`)
   idedb-sql/            SQL statement classifier for the MCP server: read, write or forbidden
   idedb-store/          data sources and query history (local SQLite), passwords (Keychain)
 ```
@@ -136,6 +137,18 @@ it holds the keymap (`src/commands/keymapHold.ts`): no shortcut, menu
 command or Shift Shift acts behind it. Every call lands in the audit log,
 which the tool window's Activity tab shows live, with filters, each call's
 details and "Open in Console".
+
+**MCP stdio bridge.** Clients that only launch local programs (Claude
+Desktop) run the app's own executable as `idedb mcp-bridge --port <port>`,
+with the client's token in `IDEDB_MCP_TOKEN`. `src-tauri/src/main.rs` checks
+for `mcp-bridge` before building Tauri, so no window or Dock icon appears;
+`crates/idedb-mcp/src/bridge.rs` relays each line of stdin to the HTTP
+server as a POST (sessions, protocol headers, SSE answers, cancellation) and
+the answers back to stdout, and opens the app in the background when nothing
+listens on the port. Its calls show in the audit log with transport
+`bridge`. To try it from a dev build:
+`IDEDB_MCP_TOKEN=<token> target/debug/idedb mcp-bridge --port 7412`, then
+type JSON-RPC messages, one per line.
 
 **Translucent sidebar.** The window is transparent over the sidebar material,
 and only the explorer and title bar let it through. This uses Tauri's

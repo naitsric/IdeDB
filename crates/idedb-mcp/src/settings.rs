@@ -10,6 +10,9 @@ use crate::Error;
 /// Most rows a client may ask `query` for.
 pub const MAX_ROWS: u32 = 1000;
 
+/// The port the server listens on unless the user picks another.
+pub const DEFAULT_PORT: u16 = 7412;
+
 /// Longest statement timeout and approval wait the settings accept.
 const MAX_SECS: u64 = 3600;
 /// Longest write timeout: approved schema changes on big tables take long.
@@ -43,7 +46,7 @@ impl Default for McpSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            port: 7412,
+            port: DEFAULT_PORT,
             max_rows: 200,
             statement_timeout_secs: 30,
             write_timeout_secs: 600,

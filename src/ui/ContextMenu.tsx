@@ -16,6 +16,26 @@ export function ContextMenuContent({ children }: { children: ReactNode }) {
   );
 }
 
+const itemClass =
+  "flex h-7 items-center justify-between gap-6 rounded px-2 text-fg outline-none data-[disabled]:opacity-40 data-[highlighted]:bg-accent data-[highlighted]:text-accent-fg [&[data-highlighted]_kbd]:border-transparent [&[data-highlighted]_kbd]:bg-white/20 [&[data-highlighted]_kbd]:text-accent-fg";
+
+/** A menu item for an action that is not a registered command. */
+export function ContextMenuItem({
+  label,
+  onSelect,
+  disabled,
+}: {
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <Menu.Item disabled={disabled} onSelect={onSelect} className={itemClass}>
+      <span>{label}</span>
+    </Menu.Item>
+  );
+}
+
 /** A menu item bound to a registered command: same title, shortcut and enablement everywhere. */
 export function CommandItem({ id, label }: { id: string; label?: string }) {
   const command = useCommands((s) => s.commands[id]);
@@ -24,7 +44,7 @@ export function CommandItem({ id, label }: { id: string; label?: string }) {
     <Menu.Item
       disabled={!isEnabled(command)}
       onSelect={() => executeCommand(id)}
-      className="flex h-7 items-center justify-between gap-6 rounded px-2 text-fg outline-none data-[disabled]:opacity-40 data-[highlighted]:bg-accent data-[highlighted]:text-accent-fg [&[data-highlighted]_kbd]:border-transparent [&[data-highlighted]_kbd]:bg-white/20 [&[data-highlighted]_kbd]:text-accent-fg"
+      className={itemClass}
     >
       <span>{label ?? command.title}</span>
       {command.keybinding && <Kbd binding={command.keybinding} />}

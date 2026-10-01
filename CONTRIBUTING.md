@@ -35,7 +35,7 @@ For SQLite, pick any file path; the database is created if it does not exist.
 
 ```sh
 pnpm typecheck    # tsc --noEmit
-pnpm test         # UI unit tests (vitest): editor, completion, consoles, grid, transactions, menu
+pnpm test         # UI unit tests (vitest): editor, completion, consoles, grid, transactions, menu, MCP
 pnpm test:rust    # Rust unit tests + driver conformance tests against the Docker databases
 ```
 
@@ -63,7 +63,9 @@ src/                 React UI
                      editor: filters, pending changes, copy/export, value viewer
   db/                typed IPC with the Rust core; data source, console, transaction
                      and result-paging state
-src-tauri/           Tauri app: commands exposed to the UI, menu
+  mcp/               the MCP server's UI: clients and grants, server settings, the
+                     approval dialog, connection snippets
+src-tauri/           Tauri app: commands exposed to the UI, menu, the MCP server's host
 crates/
   idedb-core/           engine-agnostic types, the Session trait, conformance tests
   idedb-driver-pg/      PostgreSQL (tokio-postgres)
@@ -120,6 +122,17 @@ appears under a menu picked by its category, unknown categories under Tools.
 A menu item shows its shortcut only when the key means the same thing
 everywhere; context keys (⌘⏎, ⌘B, ⌘N in the grid…) stay with the JS keymap,
 because AppKit gives menu shortcuts priority over the web view.
+
+**MCP server.** IdeDB can serve its data sources to LLM clients (Claude Code,
+Cursor…) over MCP's Streamable HTTP on `127.0.0.1` (`crates/idedb-mcp`, hosted
+by `src-tauri/src/mcp.rs`, which relays its events to the UI as
+`mcp://event`). It is off until turned on in the MCP tool window (⌘8). Each
+client has its own token, shown once, and per data source access: read, or
+write. Reads run on read-only sessions; every write waits for the user in the
+approval dialog, which is built not to be answered by accident: Reject has
+the focus, Enter never approves, and Approve unlocks 800 ms after a request
+shows, the window comes forward or the user stops typing. Every call lands
+in the audit log.
 
 **Translucent sidebar.** The window is transparent over the sidebar material,
 and only the explorer and title bar let it through. This uses Tauri's

@@ -64,6 +64,8 @@ const CATEGORY_MENU: [category: string, menu: MenuId][] = [
   ["Navigate", "navigate"],
   ["Console", "query"],
   ["Transaction", "query"],
+  // First in Tools, ahead of categories nobody placed.
+  ["MCP", "tools"],
 ];
 
 /**

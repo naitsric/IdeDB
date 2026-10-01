@@ -43,9 +43,10 @@ import {
   typingInField,
 } from "../grid/actions";
 import { activeGrid, selectedRows, toggleValueViewer, useGrids } from "../grid/dataEditor";
+import { openNewClient, showApprovals, toggleServer, useMcp } from "../mcp/store";
 import { useTheme, useTranslucentSidebar } from "../theme";
 import { closeActivePanel, hasActivePanel, useWorkbench } from "../workbench/bridge";
-import { restoreDefaultLayout, showExplorer, toggleExplorer } from "../workbench/Workbench";
+import { restoreDefaultLayout, showExplorer, toggleExplorer, toggleMcp } from "../workbench/Workbench";
 import { useHistoryPalette } from "./HistoryPalette";
 import { registerCommands, type Command } from "./registry";
 import { useSearchEverywhere } from "./SearchEverywhere";
@@ -518,6 +519,15 @@ export function registerAppCommands(): () => void {
       run: toggleExplorer,
     },
     {
+      id: "view.toolWindow.mcp",
+      title: "MCP",
+      category: "View",
+      // IntelliJ's Services key: the tool window of a server IdeDB runs.
+      keybinding: "$mod+Digit8",
+      keywords: ["model context protocol", "ai", "llm", "agents", "clients", "tokens", "server"],
+      run: toggleMcp,
+    },
+    {
       id: "view.closeTab",
       title: "Close Tab",
       category: "Workbench",
@@ -539,6 +549,30 @@ export function registerAppCommands(): () => void {
       category: "View",
       keywords: ["reset", "windows"],
       run: restoreDefaultLayout,
+    },
+
+    // MCP server
+    {
+      id: "mcp.toggleServer",
+      title: "Toggle MCP Server",
+      category: "MCP",
+      keywords: ["start", "stop", "enable", "disable", "ai", "llm", "model context protocol"],
+      run: toggleServer,
+    },
+    {
+      id: "mcp.newClient",
+      title: "New MCP Client",
+      category: "MCP",
+      keywords: ["add", "token", "claude", "cursor", "ai", "llm", "agent"],
+      run: openNewClient,
+    },
+    {
+      id: "mcp.showApprovals",
+      title: "Show Pending Approvals",
+      category: "MCP",
+      keywords: ["approve", "reject", "write", "waiting"],
+      enabled: () => useMcp.getState().approvals.requests.length > 0,
+      run: showApprovals,
     },
 
     // Appearance

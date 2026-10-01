@@ -23,6 +23,10 @@ with real data: it checks your SQL against the server without running it,
 never commits a transaction you opened, and asks before throwing away
 unsaved work.
 
+It can also share your connections with an AI assistant over MCP, on your
+terms: you choose what each assistant may touch, approve every write, and
+see every call it made.
+
 ## Features
 
 ### Connect
@@ -82,6 +86,19 @@ unsaved work.
 - If a lost connection or an implicit commit ends a transaction, the console
   tells you.
 
+### Share with AI assistants
+- A **built-in MCP server** for Claude Code, Claude Desktop, Cursor or any
+  MCP client. It is reachable from this Mac only and stays off until you turn
+  it on. See [Connect an LLM over MCP](#connect-an-llm-over-mcp).
+- **A token per assistant**, revocable at once, and per connection access:
+  none, read, or read and write.
+- **You approve every write.** Reads run in read-only sessions; a statement
+  that changes data or schema waits for you with the full SQL, the connection
+  and the assistant's reason.
+- **Every call is on record**: which assistant, which connection, the SQL,
+  the rows, how long it took and what was decided. Filter the log and open any
+  statement in a console.
+
 ### Feels like a Mac app
 - Native menu bar, translucent sidebar, light and dark themes following the
   system, and a window that reopens where you left it.
@@ -105,6 +122,7 @@ unsaved work.
 | Submit data changes (in the grid) | ⌘⏎     |
 | Commit / Rollback               | ⌥⌘⏎ / ⌥⇧⌘Z |
 | Database Explorer               | ⌘1       |
+| MCP (server, clients, activity) | ⌘8       |
 
 Every action is also in Find Action (⇧⌘A) and in the menu bar.
 
@@ -179,6 +197,13 @@ asked, the connection, the full SQL with a warning for a `DELETE` without
 `WHERE` or a `DROP`, and the assistant's reason. Reject has the focus and
 Enter never approves. Mark a connection **Never write** to refuse writes
 without asking. Revoking a client stops its token at once.
+
+**See everything it did.** The **Activity** tab lists every call as it
+happens: the client, the connection, the tool, the SQL, the rows returned or
+changed, how long it took, and whether it ran, was refused, or was approved
+or rejected by you. Filter it by client, connection, decision or SQL text,
+and open any statement in a console to run it yourself. Results are never
+stored, only what was asked and what happened.
 
 **Share connections through a read-only database user.** A read-only session
 stops writes, but not everything the database user itself is allowed to do

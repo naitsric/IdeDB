@@ -54,7 +54,7 @@ import {
   useMcp,
 } from "./store";
 import { EmptyState, LoadErrorBanner, ServerBanner, useServerOff } from "./TabParts";
-import { useT } from "../i18n";
+import { formatNumber, useT } from "../i18n";
 
 /** Every row is this tall, so which rows are on screen is arithmetic. */
 const ROW_HEIGHT = 44;
@@ -236,7 +236,7 @@ function Toolbar({ inputRef, onLeave }: { inputRef: RefObject<HTMLInputElement |
         className="ml-auto shrink-0 px-1.5 text-[11px] text-subtle tabular-nums"
         title={log.exhausted ? undefined : t("mcp.activity.olderHint")}
       >
-        {count.toLocaleString("en-US")}
+        {formatNumber(count)}
         {!log.exhausted && count > 0 && "+"} {t(count === 1 && log.exhausted ? "mcp.activity.entry" : "mcp.activity.entries")}
       </span>
       <IconButton label={t("command.explorer.refresh")} className="size-6" onClick={() => void reloadActivity()}>
@@ -480,7 +480,7 @@ function ActivityList({
           className="absolute top-2 left-1/2 z-10 flex h-6 -translate-x-1/2 items-center gap-1 rounded-full bg-accent px-2.5 text-[11.5px] font-medium text-accent-fg shadow-popover hover:brightness-110"
         >
           <ArrowUp className="size-3" />
-          {t("mcp.activity.new", { count: unseen.toLocaleString("en-US") })}
+          {t("mcp.activity.new", { count: formatNumber(unseen) })}
         </button>
       )}
       <div

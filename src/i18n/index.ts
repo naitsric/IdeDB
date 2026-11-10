@@ -121,6 +121,11 @@ export function useT(): typeof t {
   return useCallback((key: MessageKey, params?: Params) => translate(key, params, locale, CATALOGS), [locale]);
 }
 
+/** A number written for the active language (separators included). */
+export function formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
+  return new Intl.NumberFormat(useLanguage.getState().locale, options).format(value);
+}
+
 export function useLocale(): Locale {
   return useLanguage((s) => s.locale);
 }

@@ -1,4 +1,4 @@
-import { t } from "../i18n";
+import { formatNumber, t } from "../i18n";
 import type { McpSettings } from "./api";
 
 /**
@@ -20,7 +20,6 @@ export const FIELD_RANGE: Record<SettingsField, readonly [number, number]> = {
 
 const FIELDS = Object.keys(FIELD_RANGE) as SettingsField[];
 
-const count = new Intl.NumberFormat("en-US");
 
 export function draftOf(settings: McpSettings): SettingsDraft {
   return Object.fromEntries(FIELDS.map((field) => [field, String(settings[field])])) as SettingsDraft;
@@ -30,7 +29,7 @@ function rangeError(field: SettingsField): string {
   const [min, max] = FIELD_RANGE[field];
   return field === "port"
     ? t("mcp.form.portRange", { min, max })
-    : t("mcp.form.numberRange", { min, max: count.format(max) });
+    : t("mcp.form.numberRange", { min, max: formatNumber(max) });
 }
 
 /**

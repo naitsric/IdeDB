@@ -1,6 +1,6 @@
 import { LoaderCircle, Pin, X } from "lucide-react";
 import { useT } from "../../i18n";
-import { useConsoles, type ResultMeta } from "../../db/consoles";
+import { useConsoles, resultTitle, type ResultMeta } from "../../db/consoles";
 import { cx } from "../../ui/primitives";
 
 /**
@@ -38,7 +38,7 @@ export function ResultTabs({
           >
             {result.status === "running" && <LoaderCircle className="size-3 animate-spin text-accent" />}
             {result.status === "error" && <span className="size-1.5 rounded-full bg-danger" />}
-            <span className="whitespace-nowrap">{result.title}</span>
+            <span className="whitespace-nowrap">{resultTitle(result, t)}</span>
             <button
               type="button"
               aria-label={result.pinned ? t("results.unpinTab") : t("results.pinTab")}

@@ -1,4 +1,4 @@
-import { t, useLanguage, type MessageKey } from "../i18n";
+import { formatNumber, t, useLanguage, type MessageKey } from "../i18n";
 import type { AuditEntry, AuditFilter, Decision } from "./api";
 
 /**
@@ -306,5 +306,5 @@ export function countLabel(entry: Pick<AuditEntry, "tool" | "rowCount" | "trunca
   if (entry.rowCount === null) return null;
   const [one, many] = COUNTED[entry.tool] ?? ["mcp.count.row", "mcp.count.rows"];
   const n = entry.rowCount;
-  return `${n.toLocaleString("en-US")}${entry.truncated ? "+" : ""} ${t(n === 1 && !entry.truncated ? one : many)}`;
+  return `${formatNumber(n)}${entry.truncated ? "+" : ""} ${t(n === 1 && !entry.truncated ? one : many)}`;
 }

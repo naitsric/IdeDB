@@ -14,11 +14,19 @@ import type { TableFilter } from "./sql";
  * Console text persists across launches; results do not.
  */
 
+/** The tab title, built when shown so it follows the active language. */
+export function resultTitle(result: Pick<ResultMeta, "title" | "ordinal">, translate: typeof t = t): string {
+  return result.title ?? translate("results.defaultTitle", { count: result.ordinal });
+}
+
 export type ResultStatus = "running" | "done" | "cancelled" | "error";
 
 export interface ResultMeta {
   id: number;
-  title: string;
+  /** An explicit title; without one the tab shows "Result {ordinal}" in the active language. */
+  title?: string;
+  /** Number of the result within its console, for the default title. */
+  ordinal: number;
   pinned: boolean;
   sql: string;
   status: ResultStatus;
@@ -294,9 +302,11 @@ export const useConsoles = create<ConsolesState>((set, get) => {
     if (!entry) return undefined;
     const replace = replacedResult(entry, newTab);
     const resultCount = replace ? entry.resultCount : entry.resultCount + 1;
+    const ordinal = replace ? replace.ordinal : resultCount;
     const result: ResultMeta = {
       id: ++nextResultId,
-      title: replace?.title ?? t("results.defaultTitle", { count: resultCount }),
+      title: replace?.title,
+      ordinal,
       pinned: false,
       sql,
       status: "running",

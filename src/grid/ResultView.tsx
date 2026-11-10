@@ -6,7 +6,7 @@ import type { Value } from "../db/api";
 import { useConsoles, type ResultMeta } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { rowsLabel, shouldFetchMore, useFetchSettings } from "../db/fetching";
-import { useT } from "../i18n";
+import { formatNumber, useT } from "../i18n";
 import { ContextMenuRoot, ContextMenuTrigger } from "../ui/ContextMenu";
 import { formatDuration } from "../ui/format";
 import { editCell, visibleRowCount } from "./actions";
@@ -18,7 +18,6 @@ import { ResultGrid } from "./ResultGrid";
 import { TableBar } from "./TableBar";
 import { ValueViewer } from "./ValueViewer";
 
-const count = new Intl.NumberFormat("en-US");
 const MAX_AGGREGATED_CELLS = 1_000_000;
 
 /**
@@ -65,7 +64,7 @@ export const ResultView = memo(function ResultView({
           <Empty>
             {result.affectedRows !== undefined
               ? t(result.affectedRows === 1 ? "result.affected.one" : "result.affected.many", {
-                  count: count.format(result.affectedRows),
+                  count: formatNumber(result.affectedRows),
                 })
               : t("result.executed")}
           </Empty>
@@ -286,7 +285,7 @@ function MoreRowsActions({ consoleId, result }: { consoleId: string; result: Res
   if (result.more === "open") {
     return (
       <span className="flex shrink-0 items-center gap-2">
-        <LinkButton onClick={() => void fetchMore(consoleId, result.id)}>{t("result.fetchNext", { count: count.format(pageSize) })}</LinkButton>
+        <LinkButton onClick={() => void fetchMore(consoleId, result.id)}>{t("result.fetchNext", { count: formatNumber(pageSize) })}</LinkButton>
         <LinkButton onClick={() => void fetchMore(consoleId, result.id, true)}>{t("result.fetchAll")}</LinkButton>
         <button
           type="button"

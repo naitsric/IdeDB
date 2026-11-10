@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { PAGE_SIZE_CHOICES, parsePageSize, setPageSize, useFetchSettings } from "../db/fetching";
-import { useT } from "../i18n";
+import { formatNumber, useT } from "../i18n";
 import { inputClass, Modal } from "../ui/Modal";
 import { Button, cx } from "../ui/primitives";
 
-const count = new Intl.NumberFormat("en-US");
 
 /** How many rows a statement loads before pausing (Result Page Size…). */
 export function PageSizeDialog() {
@@ -60,7 +59,7 @@ export function PageSizeDialog() {
                   : "border-border text-muted hover:border-border-strong hover:text-fg",
               )}
             >
-              {count.format(choice)}
+              {formatNumber(choice)}
             </button>
           ))}
         </div>

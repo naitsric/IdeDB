@@ -32,7 +32,7 @@ import {
   setCell,
   toChanges,
 } from "./edits";
-import { t } from "../i18n";
+import { formatNumber, t } from "../i18n";
 import { EXPORT_EXTENSION, toCsv, toInserts, toJson, toJsonObjects, toTsv, type ExportFormat } from "./format";
 
 /**
@@ -290,7 +290,7 @@ export async function exportResult(format: ExportFormat) {
   const notice = (message: string) => useGrids.setState((s) => ({ notices: { ...s.notices, [grid.result.id]: message } }));
 
   if (grid.result.more === "open") {
-    const fetchAll = await ask(t("export.onlyLoaded", { count: grid.result.rowCount.toLocaleString("en-US") }), {
+    const fetchAll = await ask(t("export.onlyLoaded", { count: formatNumber(grid.result.rowCount) }), {
       title: t("export.fetchAllTitle"),
       okLabel: t("export.fetchAll"),
       cancelLabel: t("export.exportLoaded"),
@@ -338,7 +338,7 @@ export async function exportResult(format: ExportFormat) {
       }
       await api.exportWrite(target.token, chunk);
     }
-    notice(t("export.done", { count: total.toLocaleString("en-US"), file: target.fileName }) + partial);
+    notice(t("export.done", { count: formatNumber(total), file: target.fileName }) + partial);
   } catch (e) {
     notice(t("export.failed", { error: errorMessage(e) }));
   } finally {

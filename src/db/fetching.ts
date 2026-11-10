@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { t } from "../i18n";
+import { formatNumber, t } from "../i18n";
 
 /**
  * Results are read a page at a time, as DataGrip does: a statement fetches
@@ -53,12 +53,11 @@ export function setPageSize(pageSize: number) {
   }
 }
 
-const count = new Intl.NumberFormat("en-US");
 
 /** `500+ rows` while more can or could be loaded, `42 rows` when that is all. */
 export function rowsLabel(loaded: number, more: MoreRows): string {
-  if (more !== "none") return t("rows.more", { count: count.format(loaded) });
-  return t(loaded === 1 ? "rows.one" : "rows.other", { count: count.format(loaded) });
+  if (more !== "none") return t("rows.more", { count: formatNumber(loaded) });
+  return t(loaded === 1 ? "rows.one" : "rows.other", { count: formatNumber(loaded) });
 }
 
 /** Whether scrolling to `lastVisibleRow` should fetch the next page. */

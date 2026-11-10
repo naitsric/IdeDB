@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildMenuModel } from "../menu/menuModel";
 import type { Command } from "../commands/registry";
-import { LOCALES, detectLocale, translate, useLanguage, t, type Catalogs } from "./index";
+import { LOCALES, detectLocale, translate, useLanguage, formatNumber, t, type Catalogs } from "./index";
 import en from "./locales/en";
 import es from "./locales/es";
 
@@ -157,5 +157,17 @@ describe("initial language", () => {
   });
   it("ignores a stored language that has no file any more", async () => {
     expect(await fresh("de", ["es-ES"])).toBe("es");
+  });
+});
+
+describe("number format", () => {
+  afterEach(() => useLanguage.getState().setPreference("system"));
+
+  it("follows the active language", () => {
+    useLanguage.getState().setPreference("en");
+    expect(formatNumber(1234567)).toBe("1,234,567");
+    useLanguage.getState().setPreference("es");
+    expect(formatNumber(1234567)).toBe("1.234.567");
+    expect(formatNumber(1.5, { maximumFractionDigits: 6 })).toBe("1,5");
   });
 });

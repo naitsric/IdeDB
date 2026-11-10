@@ -33,15 +33,14 @@ import {
   useMcp,
 } from "./store";
 import { EmptyState, LoadErrorBanner, ServerBanner } from "./TabParts";
+import { useT, type MessageKey } from "../i18n";
 
 /** How often presence ("Online", "5 min ago") is worked out again. */
 const PRESENCE_TICK_MS = 15_000;
 
-const NEVER_WRITE_HINT =
-  "Never write: refuses every write on this data source without asking, for every MCP client, whatever their access.";
-
 /** The MCP clients, and what the selected one may do on each data source. */
 export function ClientsTab() {
+  const t = useT();
   const clients = useMcp((s) => s.clients);
   const loaded = useMcp((s) => s.loaded);
   const selectedId = useMcp((s) => s.selectedClientId);
@@ -51,11 +50,10 @@ export function ClientsTab() {
   let body: ReactNode = null;
   if (loaded && clients.length === 0) {
     body = (
-      <EmptyState icon={Bot} title="No MCP clients yet">
-        Create one for each app that should reach your data sources through IdeDB, like Claude Code or Cursor. Each
-        gets its own token, and only the access you grant it.
+      <EmptyState icon={Bot} title={t("mcp.clients.none.title")}>
+        {t("mcp.clients.none.body")}
         <Button variant="primary" className="mt-3" onClick={openNewClient}>
-          <Plus className="size-3.5" /> New Client
+          <Plus className="size-3.5" /> {t("mcp.activity.newClient")}
         </Button>
       </EmptyState>
     );
@@ -78,6 +76,7 @@ export function ClientsTab() {
 }
 
 function ClientList({ clients, selected, now }: { clients: McpClient[]; selected?: McpClient; now: number }) {
+  const t = useT();
   const list = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -107,17 +106,17 @@ function ClientList({ clients, selected, now }: { clients: McpClient[]; selected
   return (
     <div className="flex w-[clamp(11rem,32%,16rem)] shrink-0 flex-col border-r border-border">
       <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-border px-1.5">
-        <IconButton label="New Client" onClick={openNewClient}>
+        <IconButton label={t("mcp.activity.newClient")} onClick={openNewClient}>
           <Plus className="size-4" />
         </IconButton>
         <span className="ml-auto px-1.5 text-[11px] text-subtle tabular-nums">
-          {clients.length} {clients.length === 1 ? "client" : "clients"}
+          {clients.length} {t(clients.length === 1 ? "mcp.clients.one" : "mcp.clients.many")}
         </span>
       </div>
       <div
         ref={list}
         role="listbox"
-        aria-label="MCP clients"
+        aria-label={t("mcp.clients.listLabel")}
         tabIndex={0}
         aria-activedescendant={selected ? `mcp-client-${selected.id}` : undefined}
         onKeyDown={onKeyDown}
@@ -132,6 +131,7 @@ function ClientList({ clients, selected, now }: { clients: McpClient[]; selected
 }
 
 function ClientRow({ client, selected, now }: { client: McpClient; selected: boolean; now: number }) {
+  const t = useT();
   const revoked = !!client.revokedAt;
   const online = !revoked && isOnline(client.lastSeenAt, now);
   const info = clientInfoLabel(client.lastClientName, client.lastClientVersion);
@@ -167,13 +167,13 @@ function ClientRow({ client, selected, now }: { client: McpClient; selected: boo
                 )}
                 title={revoked ? undefined : presenceLabel(client.lastSeenAt, now)}
               >
-                {revoked ? "Revoked" : presenceShort(client.lastSeenAt, now)}
+                {revoked ? t("mcp.clients.revoked") : presenceShort(client.lastSeenAt, now)}
               </span>
             </div>
             <div className="flex min-w-0 items-baseline gap-1.5 text-[11px] text-subtle">
               <span className="shrink-0 font-mono">{client.tokenPrefix}…</span>
               {info && (
-                <span className="truncate" title={`${info}, as reported by the client`}>
+                <span className="truncate" title={t("mcp.clients.reportedBy", { info })}>
                   · {info}
                 </span>
               )}
@@ -182,19 +182,20 @@ function ClientRow({ client, selected, now }: { client: McpClient; selected: boo
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem label="Show Activity" onSelect={() => showClientActivity(client.id)} />
+        <ContextMenuItem label={t("mcp.clients.showActivity")} onSelect={() => showClientActivity(client.id)} />
         <ContextMenuSeparator />
-        <ContextMenuItem label="Rename…" onSelect={() => openRename(client)} />
-        <ContextMenuItem label="Regenerate Token…" disabled={revoked} onSelect={() => void regenerateToken(client)} />
+        <ContextMenuItem label={t("mcp.clients.rename")} onSelect={() => openRename(client)} />
+        <ContextMenuItem label={t("mcp.clients.regenerate")} disabled={revoked} onSelect={() => void regenerateToken(client)} />
         <ContextMenuSeparator />
-        <ContextMenuItem label="Revoke…" disabled={revoked} onSelect={() => void revokeClient(client)} />
-        <ContextMenuItem label="Delete…" onSelect={() => void deleteClient(client)} />
+        <ContextMenuItem label={t("mcp.clients.revoke")} disabled={revoked} onSelect={() => void revokeClient(client)} />
+        <ContextMenuItem label={t("mcp.clients.delete")} onSelect={() => void deleteClient(client)} />
       </ContextMenuContent>
     </ContextMenuRoot>
   );
 }
 
 function ClientDetail({ client, now }: { client: McpClient; now: number }) {
+  const t = useT();
   const port = useMcp((s) => s.status.port ?? s.settings?.port ?? null);
   const revoked = !!client.revokedAt;
   const online = !revoked && isOnline(client.lastSeenAt, now);
@@ -207,35 +208,35 @@ function ClientDetail({ client, now }: { client: McpClient; now: number }) {
           <div className="flex items-baseline gap-2">
             <h2 className="selectable truncate text-[13px] font-semibold text-fg">{client.name}</h2>
             <span className={cx("shrink-0 text-[11.5px]", revoked ? "text-danger" : online ? "text-success" : "text-subtle")}>
-              {revoked ? "Revoked" : presenceLabel(client.lastSeenAt, now)}
+              {revoked ? t("mcp.clients.revoked") : presenceLabel(client.lastSeenAt, now)}
             </span>
           </div>
           <p className="mt-0.5 flex flex-wrap gap-x-3 text-[11.5px] text-subtle">
             <span>
-              Token <span className="font-mono text-muted">{client.tokenPrefix}…</span>
+              {t("mcp.clients.token")} <span className="font-mono text-muted">{client.tokenPrefix}…</span>
             </span>
-            <span>Created {formatDay(client.createdAt, now)}</span>
+            <span>{t("mcp.clients.created", { date: formatDay(client.createdAt, now) })}</span>
             {info && (
-              <span title="What the client said about itself. IdeDB only verifies the token.">
-                Reported as <span className="text-muted">{info}</span>
+              <span title={t("mcp.clients.reportedHint")}>
+                {t("mcp.detail.reportedAs")} <span className="text-muted">{info}</span>
               </span>
             )}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
-          <IconButton label="Show Activity" onClick={() => showClientActivity(client.id)}>
+          <IconButton label={t("mcp.clients.showActivity")} onClick={() => showClientActivity(client.id)}>
             <Activity className="size-3.5" />
           </IconButton>
-          <IconButton label="Rename…" onClick={() => openRename(client)}>
+          <IconButton label={t("mcp.clients.rename")} onClick={() => openRename(client)}>
             <Pencil className="size-3.5" />
           </IconButton>
-          <IconButton label="Regenerate Token…" disabled={revoked} onClick={() => void regenerateToken(client)}>
+          <IconButton label={t("mcp.clients.regenerate")} disabled={revoked} onClick={() => void regenerateToken(client)}>
             <RotateCw className="size-3.5" />
           </IconButton>
-          <IconButton label="Revoke…" disabled={revoked} onClick={() => void revokeClient(client)}>
+          <IconButton label={t("mcp.clients.revoke")} disabled={revoked} onClick={() => void revokeClient(client)}>
             <Ban className="size-3.5" />
           </IconButton>
-          <IconButton label="Delete…" className="hover:text-danger" onClick={() => void deleteClient(client)}>
+          <IconButton label={t("mcp.clients.delete")} className="hover:text-danger" onClick={() => void deleteClient(client)}>
             <Trash2 className="size-3.5" />
           </IconButton>
         </div>
@@ -244,22 +245,21 @@ function ClientDetail({ client, now }: { client: McpClient; now: number }) {
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-3">
         {revoked && (
           <Notice tone="danger" icon={Ban}>
-            Revoked {formatDay(client.revokedAt!, now)}: its token no longer works. Delete it to remove it from the
-            list; its activity stays in the log.
+            {t("mcp.clients.revokedNotice", { date: formatDay(client.revokedAt!, now) })}
           </Notice>
         )}
         <section className="flex flex-col gap-2">
           <SectionTitle
-            title="Access"
-            hint="Reads run in read-only sessions. Every write waits for your approval in IdeDB."
+            title={t("mcp.clients.access")}
+            hint={t("mcp.clients.accessHint")}
           />
           <GrantsMatrix client={client} />
         </section>
         {!revoked && port !== null && (
           <section className="flex flex-col gap-2">
             <SectionTitle
-              title="Connect"
-              hint={`Paste into the client with ${TOKEN_PLACEHOLDER} replaced by its token. Lost it? Regenerate it.`}
+              title={t("mcp.clients.connect")}
+              hint={t("mcp.clients.connectHint", { placeholder: TOKEN_PLACEHOLDER })}
             />
             <SnippetPicker port={port} />
           </section>
@@ -278,15 +278,16 @@ function SectionTitle({ title, hint }: { title: string; hint: string }) {
   );
 }
 
-const LEVEL_LABEL: Record<GrantLevel, string> = { none: "None", read: "Read", write: "Write" };
-const LEVEL_TITLE: Record<GrantLevel, string> = {
-  none: "No access: the client doesn't see this data source",
-  read: "Read: queries in read-only sessions",
-  write: "Write: reads, and writes you approve one by one",
+const LEVEL_LABEL: Record<GrantLevel, MessageKey> = { none: "mcp.level.none", read: "mcp.level.read", write: "mcp.level.write" };
+const LEVEL_TITLE: Record<GrantLevel, MessageKey> = {
+  none: "mcp.level.noneHint",
+  read: "mcp.level.readHint",
+  write: "mcp.level.writeHint",
 };
 
 /** One row per data source: the client's access, and the never-write lock for every client. */
 function GrantsMatrix({ client }: { client: McpClient }) {
+  const t = useT();
   const sources = useDataSources((s) => s.sources);
   const loaded = useDataSources((s) => s.loaded);
   const neverWrite = useMcp((s) => s.neverWrite);
@@ -294,26 +295,26 @@ function GrantsMatrix({ client }: { client: McpClient }) {
   if (loaded && sources.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 rounded-md border border-dashed border-border-strong px-4 py-5 text-center">
-        <p className="text-[12px] text-muted">No data sources yet. Add one, then choose what this client may do on it.</p>
+        <p className="text-[12px] text-muted">{t("mcp.clients.noSources")}</p>
         <Button onClick={() => executeCommand("datasource.new")}>
-          <Plus className="size-3.5" /> New Data Source
+          <Plus className="size-3.5" /> {t("command.datasource.new")}
         </Button>
       </div>
     );
   }
 
   return (
-    <div role="table" aria-label={`Access of ${client.name}`} className="rounded-md border border-border">
+    <div role="table" aria-label={t("mcp.clients.accessOf", { name: client.name })} className="rounded-md border border-border">
       <div
         role="row"
         className="grid h-7 grid-cols-[minmax(0,1fr)_auto_64px] items-center gap-3 border-b border-border px-3 text-[11px] text-subtle"
       >
-        <span role="columnheader">Data source</span>
+        <span role="columnheader">{t("mcp.activity.dataSource")}</span>
         <span role="columnheader" className="w-[138px]">
-          Access
+          {t("mcp.clients.access")}
         </span>
-        <span role="columnheader" className="text-center" title={NEVER_WRITE_HINT}>
-          Never write
+        <span role="columnheader" className="text-center" title={t("mcp.clients.neverWriteHint")}>
+          {t("mcp.clients.neverWrite")}
         </span>
       </div>
       {sources.map((source) => (
@@ -329,10 +330,11 @@ function GrantsMatrix({ client }: { client: McpClient }) {
 }
 
 function GrantRow({ client, source, neverWrite }: { client: McpClient; source: DataSource; neverWrite: boolean }) {
+  const t = useT();
   const current = grantLevel(client.grants, source.id);
   const unavailable = unavailableReason(source);
   const context = { revoked: !!client.revokedAt, unavailable, neverWrite };
-  const note = unavailable ?? (neverWrite && current === "write" ? "Never write is on: its writes are refused." : null);
+  const note = unavailable ?? (neverWrite && current === "write" ? t("mcp.clients.neverWriteNote") : null);
 
   return (
     <div
@@ -361,7 +363,7 @@ function GrantRow({ client, source, neverWrite }: { client: McpClient; source: D
                 onClick={() => editDataSource(source.id)}
                 className="shrink-0 text-accent hover:underline"
               >
-                Edit…
+                {t("mcp.clients.edit")}
               </button>
             )}
           </div>
@@ -369,13 +371,13 @@ function GrantRow({ client, source, neverWrite }: { client: McpClient; source: D
       </div>
       <div role="cell">
         <Segmented
-          label={`Access to ${source.name}`}
+          label={t("mcp.clients.accessTo", { name: source.name })}
           value={current}
           onChange={(level) => void setAccess(client.id, source.id, level)}
           options={(["none", "read", "write"] as const).map((level) => ({
             value: level,
-            label: LEVEL_LABEL[level],
-            title: LEVEL_TITLE[level],
+            label: t(LEVEL_LABEL[level]),
+            title: t(LEVEL_TITLE[level]),
             blocked: levelBlocked(level, current, context),
             selectedClassName: level === "write" ? "text-warning" : level === "none" ? "text-muted" : undefined,
           }))}
@@ -385,8 +387,8 @@ function GrantRow({ client, source, neverWrite }: { client: McpClient; source: D
         <button
           type="button"
           aria-pressed={neverWrite}
-          aria-label={`Never write on ${source.name}`}
-          title={neverWrite ? `${NEVER_WRITE_HINT} On.` : NEVER_WRITE_HINT}
+          aria-label={t("mcp.clients.neverWriteOn", { name: source.name })}
+          title={neverWrite ? `${t("mcp.clients.neverWriteHint")} ${t("mcp.clients.on")}` : t("mcp.clients.neverWriteHint")}
           onClick={() => void setNeverWrite(source.id, !neverWrite)}
           className={cx(
             "inline-flex size-6 items-center justify-center rounded-md transition-colors hover:bg-hover",

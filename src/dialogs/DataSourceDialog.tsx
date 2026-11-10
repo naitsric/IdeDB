@@ -3,6 +3,7 @@ import { CircleAlert, CircleCheck, FolderOpen, LoaderCircle } from "lucide-react
 import { useEffect, useState, type FormEvent } from "react";
 import { api, errorMessage, type DataSource, type Engine, type SslMode } from "../db/api";
 import { useDataSources } from "../db/dataSources";
+import { useT } from "../i18n";
 import { EngineIcon, ENGINE_LABEL } from "../ui/EngineIcon";
 import { Field, inputClass, Modal } from "../ui/Modal";
 import { Button, cx } from "../ui/primitives";
@@ -26,6 +27,7 @@ export function DataSourceDialog() {
 }
 
 function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: () => void }) {
+  const t = useT();
   const save = useDataSources((s) => s.save);
   const [source, setSource] = useState(initial);
   /** `undefined` = leave the stored password untouched. */
@@ -75,28 +77,28 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
     <Modal
       open
       onClose={onClose}
-      title={isNew ? "New Data Source" : `Edit ${initial.name}`}
+      title={isNew ? t("command.datasource.new") : t("datasource.dialog.edit", { name: initial.name })}
       width={560}
       footer={
         <>
           <Button onClick={runTest} disabled={!valid || test.state === "testing"}>
             {test.state === "testing" && <LoaderCircle className="size-3.5 animate-spin" />}
-            Test Connection
+            {t("datasource.dialog.test")}
           </Button>
           <TestResult test={test} />
           <div className="ml-auto flex gap-2">
             <Button variant="ghost" onClick={onClose}>
-              Cancel
+              {t("common.cancel")}
             </Button>
             <Button variant="primary" onClick={() => void submit()} disabled={!valid || saving}>
-              {isNew ? "Create" : "Save"}
+              {isNew ? t("datasource.dialog.create") : t("common.save")}
             </Button>
           </div>
         </>
       }
     >
       <form onSubmit={submit} className="flex flex-col gap-3">
-        <div className="mb-1 grid grid-cols-3 gap-1 rounded-lg bg-inset p-1" role="radiogroup" aria-label="Engine">
+        <div className="mb-1 grid grid-cols-3 gap-1 rounded-lg bg-inset p-1" role="radiogroup" aria-label={t("datasource.dialog.engine")}>
           {(["postgres", "mysql", "sqlite"] as const).map((engine) => (
             <button
               key={engine}
@@ -115,7 +117,7 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
           ))}
         </div>
 
-        <Field label="Name">
+        <Field label={t("datasource.dialog.name")}>
           <input
             autoFocus
             className={inputClass}
@@ -126,7 +128,7 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
         </Field>
 
         {isFile ? (
-          <Field label="File">
+          <Field label={t("datasource.dialog.file")}>
             <div className="flex gap-2">
               <input
                 className={cx(inputClass, "font-mono text-[12px]")}
@@ -141,7 +143,7 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
                   if (typeof picked === "string") setParams({ path: picked });
                 }}
               >
-                <FolderOpen className="size-3.5" /> Browse…
+                <FolderOpen className="size-3.5" /> {t("datasource.dialog.browse")}
               </Button>
             </div>
           </Field>
@@ -150,7 +152,7 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
             <Field label="URL">
               <input
                 className={cx(inputClass, "font-mono text-[12px]")}
-                placeholder={`Paste a ${params.engine}:// URL to fill the fields below`}
+                placeholder={t("datasource.dialog.urlPlaceholder", { engine: params.engine })}
                 spellCheck={false}
                 onChange={(e) => {
                   const parsed = parseUrl(e.target.value);
@@ -161,7 +163,7 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
                 }}
               />
             </Field>
-            <Field label="Host">
+            <Field label={t("datasource.dialog.host")}>
               <div className="flex gap-2">
                 <input
                   className={inputClass}
@@ -175,7 +177,7 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
                   value={params.port ?? ""}
                   placeholder={String(DEFAULT_PORT[params.engine])}
                   inputMode="numeric"
-                  aria-label="Port"
+                  aria-label={t("datasource.dialog.port")}
                   onChange={(e) => {
                     const port = Number.parseInt(e.target.value, 10);
                     setParams({ port: Number.isFinite(port) && port > 0 && port < 65536 ? port : null });
@@ -183,7 +185,7 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
                 />
               </div>
             </Field>
-            <Field label="User">
+            <Field label={t("datasource.dialog.user")}>
               <input
                 className={inputClass}
                 value={params.user}
@@ -191,13 +193,13 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
                 onChange={(e) => setParams({ user: e.target.value })}
               />
             </Field>
-            <Field label="Password">
+            <Field label={t("datasource.dialog.password")}>
               <div className="flex items-center gap-3">
                 <input
                   type="password"
                   className={inputClass}
                   value={password ?? ""}
-                  placeholder={isNew || !initial.savePassword ? "" : "<unchanged>"}
+                  placeholder={isNew || !initial.savePassword ? "" : t("datasource.dialog.unchanged")}
                   onChange={(e) => setPassword(e.target.value)}
                 />
                 <label className="flex shrink-0 items-center gap-1.5 text-[12px] text-muted">
@@ -207,15 +209,15 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
                     onChange={(e) => setSource({ ...source, savePassword: e.target.checked })}
                     className="accent-accent"
                   />
-                  Save in Keychain
+                  {t("datasource.dialog.saveInKeychain")}
                 </label>
               </div>
             </Field>
-            <Field label="Database">
+            <Field label={t("datasource.dialog.database")}>
               <input
                 className={inputClass}
                 value={params.database}
-                placeholder={params.engine === "postgres" ? "postgres" : "optional"}
+                placeholder={params.engine === "postgres" ? "postgres" : t("datasource.dialog.optional")}
                 spellCheck={false}
                 onChange={(e) => setParams({ database: e.target.value })}
               />
@@ -226,22 +228,22 @@ function DataSourceForm({ initial, onClose }: { initial: DataSource; onClose: ()
                 value={params.sslMode}
                 onChange={(e) => setParams({ sslMode: e.target.value as SslMode })}
               >
-                <option value="disable">Disable</option>
-                <option value="prefer">Prefer</option>
-                <option value="require">Require</option>
-                <option value="verify-full">Verify full</option>
+                <option value="disable">{t("datasource.dialog.ssl.disable")}</option>
+                <option value="prefer">{t("datasource.dialog.ssl.prefer")}</option>
+                <option value="require">{t("datasource.dialog.ssl.require")}</option>
+                <option value="verify-full">{t("datasource.dialog.ssl.verifyFull")}</option>
               </select>
             </Field>
           </>
         )}
 
-        <Field label="Color">
+        <Field label={t("datasource.dialog.color")}>
           <div className="flex gap-1.5">
             {COLORS.map((color) => (
               <button
                 key={color ?? "none"}
                 type="button"
-                aria-label={color ? `Color ${color}` : "No color"}
+                aria-label={color ? t("datasource.dialog.colorValue", { color }) : t("datasource.dialog.noColor")}
                 onClick={() => setSource({ ...source, color })}
                 style={color ? { background: color } : undefined}
                 className={cx(

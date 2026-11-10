@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import type { McpSettings } from "./api";
 
 /**
@@ -27,7 +28,9 @@ export function draftOf(settings: McpSettings): SettingsDraft {
 
 function rangeError(field: SettingsField): string {
   const [min, max] = FIELD_RANGE[field];
-  return field === "port" ? `A port from ${min} to ${max}.` : `A whole number from ${min} to ${count.format(max)}.`;
+  return field === "port"
+    ? t("mcp.form.portRange", { min, max })
+    : t("mcp.form.numberRange", { min, max: count.format(max) });
 }
 
 /**

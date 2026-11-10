@@ -9,9 +9,11 @@ import { endpointUrl } from "./snippets";
 import { CopyButton } from "./SnippetPicker";
 import { serverState } from "./status";
 import { retryServer, saveSettings, toggleServer, useMcp } from "./store";
+import { useT, type MessageKey } from "../i18n";
 
 /** The server: on or off, where it listens, and the limits every client gets. */
 export function ServerTab() {
+  const t = useT();
   const settings = useMcp((s) => s.settings);
   const loadError = useMcp((s) => s.loadError);
   if (!settings) {
@@ -28,11 +30,7 @@ export function ServerTab() {
         <SettingsForm settings={settings} />
         <div className="flex items-start gap-2 rounded-md bg-inset px-3 py-2 text-[12px] text-muted">
           <ShieldAlert className="mt-px size-3.5 shrink-0 text-warning" />
-          <p>
-            Clients only see the data sources you grant them, reads run in read-only sessions, and every write waits for
-            your approval. Still, a statement can do whatever the database user may do. For each data source you
-            expose, connect as a database user that can only read what the client should see.
-          </p>
+          <p>{t("mcp.server.warning")}</p>
         </div>
       </div>
     </div>
@@ -41,6 +39,7 @@ export function ServerTab() {
 
 /** On/off, applied at once, and what the server is doing. */
 function StatusCard({ settings }: { settings: McpSettings }) {
+  const t = useT();
   const status = useMcp((s) => s.status);
   const [busy, setBusy] = useState(false);
   const { tone, label } = serverState(status, settings.enabled);
@@ -56,7 +55,7 @@ function StatusCard({ settings }: { settings: McpSettings }) {
     <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
       <div className="flex items-center gap-3">
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-medium text-fg">MCP server</div>
+          <div className="text-[13px] font-medium text-fg">{t("mcp.server.title")}</div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
             <StatusDot tone={tone} />
             <span className={cx(tone === "danger" && "text-danger")}>{label}</span>
@@ -64,11 +63,11 @@ function StatusCard({ settings }: { settings: McpSettings }) {
         </div>
         {status.error && settings.enabled && (
           <Button disabled={busy} onClick={() => void run(retryServer)}>
-            Retry
+            {t("mcp.banner.retry")}
           </Button>
         )}
         <Switch
-          label="MCP server"
+          label={t("mcp.server.title")}
           checked={settings.enabled}
           disabled={busy}
           onCheckedChange={() => void run(toggleServer)}
@@ -81,46 +80,27 @@ function StatusCard({ settings }: { settings: McpSettings }) {
         </p>
       )}
       <div className="flex items-center gap-2 border-t border-border pt-3">
-        <span className="w-[136px] shrink-0 text-right text-[12px] text-muted">Endpoint</span>
+        <span className="w-[136px] shrink-0 text-right text-[12px] text-muted">{t("mcp.server.endpoint")}</span>
         <code className={cx("selectable min-w-0 truncate font-mono text-[12px]", status.running ? "text-fg" : "text-muted")}>
           {url}
         </code>
-        <CopyButton text={url} label="Copy endpoint" />
+        <CopyButton text={url} label={t("mcp.server.copyEndpoint")} />
       </div>
     </div>
   );
 }
 
-const FIELDS: { field: SettingsField; label: string; unit?: string; hint: string }[] = [
-  { field: "port", label: "Port", hint: "On 127.0.0.1 only: nothing outside this Mac can connect." },
-  {
-    field: "maxRows",
-    label: "Rows per read",
-    unit: "rows",
-    hint: "What a read returns unless the client asks for more, up to 1,000.",
-  },
-  {
-    field: "statementTimeoutSecs",
-    label: "Statement timeout",
-    unit: "s",
-    hint: "Reads still running after this are cancelled.",
-  },
-  {
-    field: "writeTimeoutSecs",
-    label: "Write timeout",
-    unit: "s",
-    hint: "Approved writes still running after this are cancelled.",
-  },
-  {
-    field: "approvalTimeoutSecs",
-    label: "Approval timeout",
-    unit: "s",
-    hint: "A write nobody approves or rejects in this time is refused.",
-  },
+const FIELDS: { field: SettingsField; label: MessageKey; unit?: MessageKey; hint: MessageKey }[] = [
+  { field: "port", label: "mcp.server.port", hint: "mcp.server.port.hint" },
+  { field: "maxRows", label: "mcp.server.maxRows", unit: "mcp.server.rows", hint: "mcp.server.maxRows.hint" },
+  { field: "statementTimeoutSecs", label: "mcp.server.statementTimeout", unit: "mcp.server.seconds", hint: "mcp.server.statementTimeout.hint" },
+  { field: "writeTimeoutSecs", label: "mcp.server.writeTimeout", unit: "mcp.server.seconds", hint: "mcp.server.writeTimeout.hint" },
+  { field: "approvalTimeoutSecs", label: "mcp.server.approvalTimeout", unit: "mcp.server.seconds", hint: "mcp.server.approvalTimeout.hint" },
 ];
 
 /** Port and limits, saved together. A new port restarts the server. */
 function SettingsForm({ settings }: { settings: McpSettings }) {
+  const t = useT();
   // The draft and the settings it started from: unedited, it follows them.
   const [form, setForm] = useState(() => ({ base: settings, draft: draftOf(settings) }));
   const [saving, setSaving] = useState(false);
@@ -160,33 +140,33 @@ function SettingsForm({ settings }: { settings: McpSettings }) {
         {FIELDS.map(({ field, label, unit, hint }, i) => (
           <SettingRow
             key={field}
-            label={label}
-            hint={errors[field] ?? hint}
+            label={t(label)}
+            hint={errors[field] ?? t(hint)}
             invalid={!!errors[field]}
             separated={i === 1}
           >
             <input
               inputMode="numeric"
-              aria-label={label}
+              aria-label={t(label)}
               aria-invalid={!!errors[field]}
               className={cx(inputClass, "w-24 tabular-nums", errors[field] && "border-danger focus:border-danger")}
               value={form.draft[field]}
               onChange={(e) => set(field, e.target.value)}
             />
-            {unit && <span className="text-[12px] text-subtle">{unit}</span>}
+            {unit && <span className="text-[12px] text-subtle">{t(unit)}</span>}
           </SettingRow>
         ))}
       </div>
       {error && <p className="selectable pl-[148px] text-[12px] text-danger">{error}</p>}
       <div className="flex gap-2 pl-[148px]">
         <Button type="submit" variant="primary" disabled={!dirty || !parsed || saving}>
-          Save
+          {t("common.save")}
         </Button>
         <Button variant="ghost" disabled={!dirty || saving} onClick={revert}>
-          Revert
+          {t("mcp.server.revert")}
         </Button>
         {dirty && form.draft.port.trim() !== String(settings.port) && settings.enabled && (
-          <span className="self-center text-[11.5px] text-subtle">The server restarts on the new port.</span>
+          <span className="self-center text-[11.5px] text-subtle">{t("mcp.server.restarts")}</span>
         )}
       </div>
     </form>
@@ -207,9 +187,10 @@ function SettingRow({
   separated?: boolean;
   children: ReactNode;
 }) {
+  const t = useT();
   return (
     <>
-      {separated && <div className="mt-1 pl-[148px] text-[12px] font-semibold text-fg">Limits</div>}
+      {separated && <div className="mt-1 pl-[148px] text-[12px] font-semibold text-fg">{t("mcp.server.limits")}</div>}
       <label className="grid grid-cols-[136px_1fr] items-start gap-3">
         <span className="pt-1.5 text-right text-[12px] text-muted">{label}</span>
         <span className="flex flex-col gap-1">

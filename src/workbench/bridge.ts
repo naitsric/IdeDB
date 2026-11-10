@@ -1,5 +1,6 @@
 import type { DockviewApi } from "dockview-react";
 import { create } from "zustand";
+import { t } from "../i18n";
 import { confirmEndTransactions } from "../db/transactions";
 
 /**
@@ -35,7 +36,7 @@ export function showConsole(consoleId: string) {
   dockview.addPanel({
     id,
     component: "console",
-    title: "console",
+    title: t("tx.consoleFallback"),
     params: { consoleId },
     position: sibling
       ? { referencePanel: sibling, direction: "within" }

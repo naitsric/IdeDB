@@ -1,13 +1,14 @@
 import { Check, GitCommitVertical, Undo2, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useT, type MessageKey } from "../../i18n";
 import { executeCommand } from "../../commands/registry";
 import { isRunning, useConsoles } from "../../db/consoles";
 import { dismissNotice, formatElapsed, setMode, useTransactions, type TransactionMode } from "../../db/transactions";
 import { cx, IconButton } from "../../ui/primitives";
 
-const MODES: { mode: TransactionMode; label: string; hint: string }[] = [
-  { mode: "auto", label: "Auto", hint: "Each statement commits on its own (unless you type BEGIN)" },
-  { mode: "manual", label: "Manual", hint: "Statements and data editor changes stay uncommitted until Commit or Rollback" },
+const MODES: { mode: TransactionMode; label: MessageKey; hint: MessageKey }[] = [
+  { mode: "auto", label: "tx.mode.auto", hint: "tx.autoHint" },
+  { mode: "manual", label: "tx.mode.manual", hint: "tx.manualHint" },
 ];
 
 /** Ticks once a second while `active`, for the open transaction's clock. */
@@ -24,6 +25,7 @@ function useNow(active: boolean): number {
 
 /** Console toolbar part for transactions: Tx Auto / Manual, the open transaction and Commit / Rollback. */
 export function TransactionControls({ consoleId }: { consoleId: string }) {
+  const t = useT();
   const mode = useTransactions((s) => s.modes[consoleId] ?? "auto");
   const open = useTransactions((s) => s.open[consoleId]);
   const notice = useTransactions((s) => s.notices[consoleId]);
@@ -35,7 +37,7 @@ export function TransactionControls({ consoleId }: { consoleId: string }) {
 
   return (
     <>
-      <div className="ml-2 flex shrink-0 items-center rounded-md bg-inset p-0.5 text-[11px]" role="radiogroup" aria-label="Transaction mode">
+      <div className="ml-2 flex shrink-0 items-center rounded-md bg-inset p-0.5 text-[11px]" role="radiogroup" aria-label={t("tx.modeLabel")}>
         <span className="px-1.5 text-subtle">Tx</span>
         {MODES.map(({ mode: m, label, hint }) => (
           <button
@@ -43,14 +45,14 @@ export function TransactionControls({ consoleId }: { consoleId: string }) {
             type="button"
             role="radio"
             aria-checked={mode === m}
-            title={hint}
+            title={t(hint)}
             onClick={() => setMode(consoleId, m)}
             className={cx(
               "h-5 rounded px-1.5 font-medium transition-colors",
               mode === m ? "bg-elevated text-fg shadow-sm" : "text-muted hover:text-fg",
             )}
           >
-            {label}
+            {t(label)}
           </button>
         ))}
       </div>
@@ -64,20 +66,20 @@ export function TransactionControls({ consoleId }: { consoleId: string }) {
             )}
             title={
               open?.failed
-                ? "A statement failed inside the transaction: PostgreSQL only accepts ROLLBACK now"
-                : "Statements and data editor changes stay uncommitted until you commit or roll back"
+                ? t("tx.failedHint")
+                : t("tx.openHint")
             }
           >
             <GitCommitVertical className="size-3.5" />
-            {open?.failed ? "Transaction failed" : "Transaction open"}
+            {open?.failed ? t("status.transactionFailed") : t("status.transactionOpen")}
             {open && (
               <span className="font-normal opacity-80">
-                · {open.statements} {open.statements === 1 ? "statement" : "statements"} · {formatElapsed(now - open.since)}
+                · {t(open.statements === 1 ? "tx.statement" : "tx.statements", { count: open.statements })} · {formatElapsed(now - open.since)}
               </span>
             )}
           </span>
           <IconButton
-            label="Commit"
+            label={t("command.transaction.commit")}
             shortcut="$mod+Alt+Enter"
             disabled={busy}
             onClick={() => executeCommand("transaction.commit")}
@@ -86,7 +88,7 @@ export function TransactionControls({ consoleId }: { consoleId: string }) {
             <Check className="size-4" />
           </IconButton>
           <IconButton
-            label="Rollback"
+            label={t("command.transaction.rollback")}
             shortcut="$mod+Alt+Shift+KeyZ"
             disabled={busy}
             onClick={() => executeCommand("transaction.rollback")}
@@ -104,7 +106,7 @@ export function TransactionControls({ consoleId }: { consoleId: string }) {
           </span>
           <button
             type="button"
-            aria-label="Dismiss"
+            aria-label={t("tx.dismiss")}
             onClick={() => dismissNotice(consoleId)}
             className="flex size-4 shrink-0 items-center justify-center rounded hover:bg-danger/15"
           >

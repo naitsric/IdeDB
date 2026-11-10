@@ -1,4 +1,5 @@
-import type { Command } from "../commands/registry";
+import { commandTitle, type Command } from "../commands/registry";
+import { t, type MessageKey } from "../i18n";
 
 /**
  * The native menu bar, derived from the command registry: every registered
@@ -39,13 +40,13 @@ export const REPOSITORY_URL = "https://github.com/naitsric/IdeDB";
 type MenuId = "file" | "edit" | "view" | "navigate" | "query" | "tools";
 
 /** Top-level menus in bar order, after the app menu. Window and Help are fixed. */
-const MENUS: { id: MenuId; title: string }[] = [
-  { id: "file", title: "File" },
-  { id: "edit", title: "Edit" },
-  { id: "view", title: "View" },
-  { id: "navigate", title: "Navigate" },
-  { id: "query", title: "Query" },
-  { id: "tools", title: "Tools" },
+const MENUS: { id: MenuId; title: MessageKey }[] = [
+  { id: "file", title: "menu.file" },
+  { id: "edit", title: "menu.edit" },
+  { id: "view", title: "menu.view" },
+  { id: "navigate", title: "menu.navigate" },
+  { id: "query", title: "menu.query" },
+  { id: "tools", title: "menu.tools" },
 ];
 
 /**
@@ -176,7 +177,7 @@ export function buildMenuModel(commands: readonly Command[]): MenuSpec[] {
     return ordered.flatMap(([, items], i) => [
       ...(i > 0 ? [{ kind: "separator" } as const] : []),
       ...items.map(
-        (c): MenuEntry => ({ kind: "command", commandId: c.id, title: c.title, accelerator: menuAccelerator(c, commands) }),
+        (c): MenuEntry => ({ kind: "command", commandId: c.id, title: commandTitle(c), accelerator: menuAccelerator(c, commands) }),
       ),
     ]);
   };
@@ -186,7 +187,7 @@ export function buildMenuModel(commands: readonly Command[]): MenuSpec[] {
   const appItems: MenuEntry[] = appCommands.map((c) => ({
     kind: "command",
     commandId: c.id,
-    title: c.title,
+    title: commandTitle(c),
     accelerator: menuAccelerator(c, commands),
   }));
 
@@ -208,12 +209,12 @@ export function buildMenuModel(commands: readonly Command[]): MenuSpec[] {
     const items = commandItems(id);
     if (id === "edit") {
       const standard = [...predefined("undo", "redo"), separator, ...predefined("cut", "copy", "paste", "selectAll")];
-      menus.push({ title, items: items.length ? [...standard, separator, ...items] : standard });
+      menus.push({ title: t(title), items: items.length ? [...standard, separator, ...items] : standard });
     } else if (items.length) {
-      menus.push({ title, items });
+      menus.push({ title: t(title), items });
     }
   }
-  menus.push({ title: "Window", items: predefined("minimize", "zoom", "fullscreen") });
-  menus.push({ title: "Help", items: [{ kind: "link", title: "IdeDB on GitHub", url: REPOSITORY_URL }] });
+  menus.push({ title: t("menu.window"), items: predefined("minimize", "zoom", "fullscreen") });
+  menus.push({ title: t("menu.help"), items: [{ kind: "link", title: t("menu.help.github"), url: REPOSITORY_URL }] });
   return menus;
 }

@@ -1,5 +1,6 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
+import { t } from "../i18n";
 import { api, errorMessage, type Column, type SessionId, type TableRef, type Value } from "./api";
 import { invalidateChecks } from "./checkRevisions";
 import { openSessionFor, useDataSources } from "./dataSources";
@@ -223,11 +224,11 @@ export function setExecutionHooks(hooks: ExecutionHooks) {
 
 /** The one place that asks before unsubmitted changes are thrown away. */
 async function confirmDiscard(count: number): Promise<boolean> {
-  return ask("They have not been submitted and will be lost.", {
-    title: `Discard ${count} pending ${count === 1 ? "change" : "changes"}?`,
+  return ask(t("discard.message"), {
+    title: t(count === 1 ? "discard.title.one" : "discard.title.many", { count }),
     kind: "warning",
-    okLabel: "Discard",
-    cancelLabel: "Keep Editing",
+    okLabel: t("discard.ok"),
+    cancelLabel: t("discard.keepEditing"),
   });
 }
 
@@ -295,7 +296,7 @@ export const useConsoles = create<ConsolesState>((set, get) => {
     const resultCount = replace ? entry.resultCount : entry.resultCount + 1;
     const result: ResultMeta = {
       id: ++nextResultId,
-      title: replace?.title ?? `Result ${resultCount}`,
+      title: replace?.title ?? t("results.defaultTitle", { count: resultCount }),
       pinned: false,
       sql,
       status: "running",

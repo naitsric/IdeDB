@@ -23,6 +23,7 @@ import { editorApi } from "./editorApi";
 import { currentStatementHighlight, flashField, intellijKeymap, statementsField } from "./extensions";
 import { registerEditor } from "./registry";
 import { editorHighlighting, editorTheme } from "./theme";
+import { t } from "../i18n";
 
 interface SqlEditorProps {
   consoleId: string;
@@ -95,7 +96,7 @@ export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog, 
             if (update.docChanged) latest.current.onChange(update.state.doc.toString());
           }),
           EditorView.contentAttributes.of({
-            "aria-label": "SQL console",
+            "aria-label": t("editor.ariaLabel"),
             spellcheck: "false",
             autocorrect: "off",
             autocapitalize: "off",

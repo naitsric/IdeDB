@@ -14,6 +14,7 @@ import type { AuditEntry, Decision } from "./api";
 import { DECISION_HINT, DECISION_LABEL, DECISION_TONE, TRANSPORT_LABEL } from "./labels";
 import { clientInfoLabel } from "./presence";
 import { CopyButton } from "./SnippetPicker";
+import { useT } from "../i18n";
 
 const TONE_CLASS: Record<(typeof DECISION_TONE)[Decision], string> = {
   neutral: "bg-active text-muted",
@@ -58,6 +59,7 @@ export function openInConsole(entry: AuditEntry) {
 
 /** Everything recorded about one tool call, its SQL, and what can be done with it. */
 export function ActivityDetail({ entry }: { entry: AuditEntry | undefined }) {
+  const t = useT();
   const source = useDataSources((s) => (entry ? s.sources.find((x) => x.id === entry.dataSourceId) : undefined));
   const now = useNow(60_000);
 
@@ -65,17 +67,17 @@ export function ActivityDetail({ entry }: { entry: AuditEntry | undefined }) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-[12px] text-subtle">
         <MousePointerClick className="size-5" strokeWidth={1.5} />
-        Select an entry to see everything recorded about it.
+        {t("mcp.detail.select")}
       </div>
     );
   }
 
   const blocker = consoleBlocker(entry, !!source);
   const reportedAs = clientInfoLabel(entry.clientInfoName, entry.clientInfoVersion);
-  const title = `${entry.statementKind ?? entry.tool}${entry.dataSourceName ? ` on ${entry.dataSourceName}` : ""}`;
+  const title = `${entry.statementKind ?? entry.tool}${entry.dataSourceName ? ` ${t("mcp.detail.on", { name: entry.dataSourceName })}` : ""}`;
 
   return (
-    <section aria-label="Activity details" className="flex h-full min-w-0 flex-col">
+    <section aria-label={t("mcp.detail.label")} className="flex h-full min-w-0 flex-col">
       <header className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-2">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
@@ -89,12 +91,12 @@ export function ActivityDetail({ entry }: { entry: AuditEntry | undefined }) {
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          {entry.sql !== null && <CopyButton text={entry.sql} label="Copy SQL" />}
+          {entry.sql !== null && <CopyButton text={entry.sql} label={t("mcp.activity.copySql")} />}
           {/* A disabled button shows no tooltip; its wrapper does. */}
-          <span title={blocker ?? "A new console on the data source, with this SQL in the editor, not run  ⏎"}>
+          <span title={blocker ?? t("mcp.detail.openHint")}>
             <Button disabled={blocker !== null} onClick={() => openInConsole(entry)}>
               <SquareTerminal className="size-3.5" />
-              Open in Console
+              {t("mcp.activity.openInConsole")}
             </Button>
           </span>
         </div>
@@ -111,82 +113,82 @@ export function ActivityDetail({ entry }: { entry: AuditEntry | undefined }) {
           <div className="flex flex-col gap-1">
             <SqlViewer sql={entry.sql} engine={source?.params.engine} maxHeight={220} label="SQL" />
             {entry.sqlTruncated && (
-              <p className="text-[11.5px] text-warning">The SQL was longer: only its first 100 KiB was recorded.</p>
+              <p className="text-[11.5px] text-warning">{t("mcp.detail.sqlLonger")}</p>
             )}
           </div>
         )}
 
         <dl className="grid grid-cols-[112px_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1.5 text-[12px]">
-          <Field label="Time">
+          <Field label={t("mcp.detail.time")}>
             <Value>{formatFullTime(entry.at)}</Value>
           </Field>
-          <Field label="Decision">
+          <Field label={t("mcp.activity.decision")}>
             <span className="text-fg">{DECISION_LABEL[entry.decision]}</span>
             <span className="text-muted"> · {DECISION_HINT[entry.decision]}</span>
           </Field>
-          <Field label="Client">
+          <Field label={t("mcp.activity.client")}>
             <span className="flex flex-wrap items-center gap-x-2">
               <span className="font-medium text-fg">{entry.clientName}</span>
-              <span className="flex items-center gap-1 text-[11.5px] text-success" title="Its token is registered in IdeDB">
-                <ShieldCheck className="size-3.5" /> Verified token
+              <span className="flex items-center gap-1 text-[11.5px] text-success" title={t("mcp.detail.tokenHint")}>
+                <ShieldCheck className="size-3.5" /> {t("mcp.detail.verified")}
               </span>
             </span>
           </Field>
-          <Field label="Reported as">
+          <Field label={t("mcp.detail.reportedAs")}>
             {reportedAs ? (
               <>
                 <span className="selectable text-fg">{reportedAs}</span>
-                <span className="text-subtle"> · unverified, as the client says</span>
+                <span className="text-subtle"> · {t("mcp.detail.unverified")}</span>
               </>
             ) : (
               <None />
             )}
           </Field>
-          <Field label="Data source">
+          <Field label={t("mcp.activity.dataSource")}>
             {entry.dataSourceName ? (
               <span className="flex min-w-0 items-center gap-1.5">
                 <SourceDot source={source} />
                 {source && <EngineIcon engine={source.params.engine} />}
                 <span className={cx("truncate", source ? "text-fg" : "text-muted")}>{entry.dataSourceName}</span>
-                {!source && <span className="shrink-0 text-subtle">· no longer exists</span>}
+                {!source && <span className="shrink-0 text-subtle">· {t("mcp.detail.noLongerExists")}</span>}
               </span>
             ) : (
               <None />
             )}
           </Field>
-          <Field label="Tool">
+          <Field label={t("mcp.detail.tool")}>
             <span className="font-mono text-[11.5px] text-fg">{entry.tool}</span>
           </Field>
-          <Field label="Statement">{entry.statementKind ? <span className="text-fg">{entry.statementKind}</span> : <None />}</Field>
+          <Field label={t("mcp.detail.statement")}>{entry.statementKind ? <span className="text-fg">{entry.statementKind}</span> : <None />}</Field>
           {entry.reason !== null && (
-            <Field label="Reason">
+            <Field label={t("mcp.detail.reason")}>
               <span className="selectable text-fg">“{entry.reason}”</span>
-              <span className="text-subtle"> · given by the client</span>
+              <span className="text-subtle"> · {t("mcp.detail.givenByClient")}</span>
             </Field>
           )}
-          <Field label="Approval wait">
+          <Field label={t("mcp.detail.approvalWait")}>
             {entry.approvalWaitMs !== null ? <Value>{formatDuration(entry.approvalWaitMs)}</Value> : <None />}
           </Field>
-          <Field label="Elapsed">{entry.elapsedMs !== null ? <Value>{formatDuration(entry.elapsedMs)}</Value> : <None />}</Field>
-          <Field label="Rows">
+          <Field label={t("mcp.detail.elapsed")}>{entry.elapsedMs !== null ? <Value>{formatDuration(entry.elapsedMs)}</Value> : <None />}</Field>
+          <Field label={t("mcp.detail.rows")}>
             {entry.rowCount !== null ? <Value>{countLabel({ ...entry, truncated: false })}</Value> : <None />}
-            {entry.truncated && <span className="text-warning"> · result cut short</span>}
+            {entry.truncated && <span className="text-warning"> · {t("mcp.detail.cutShort")}</span>}
           </Field>
-          <Field label="SQL truncated">
-            <Value>{entry.sqlTruncated ? "Yes, to its first 100 KiB" : "No"}</Value>
+          <Field label={t("mcp.detail.sqlTruncated")}>
+            <Value>{entry.sqlTruncated ? t("mcp.detail.yesTruncated") : t("mcp.detail.no")}</Value>
           </Field>
-          <Field label="Transport">
+          <Field label={t("mcp.detail.transport")}>
             <Value>{TRANSPORT_LABEL[entry.transport]}</Value>
           </Field>
-          <Field label="Protocol">{entry.protocolVersion ? <Value>{entry.protocolVersion}</Value> : <None />}</Field>
-          <Field label="Session">
+          <Field label={t("mcp.detail.protocol")}>{entry.protocolVersion ? <Value>{entry.protocolVersion}</Value> : <None />}</Field>
+          <Field label={t("mcp.detail.session")}>
             {entry.sessionKey ? (
               <span className="selectable font-mono text-[11.5px] break-all text-fg">{entry.sessionKey}</span>
             ) : (
               <None />
             )}
           </Field>
-          <Field label="Entry">
+          <Field label={t("mcp.detail.entry")}>
             <Value>#{entry.id}</Value>
           </Field>
         </dl>

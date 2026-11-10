@@ -9,6 +9,7 @@ import {
   runStatements,
   statementsToRun,
 } from "../actions";
+import { LOCALES, t, useLanguage, type MessageKey } from "../i18n";
 import { editorFor } from "../editor/registry";
 import { revealInExplorer } from "../explorer/reveal";
 import { activeResult, isRunning, useConsoles } from "../db/consoles";
@@ -90,11 +91,10 @@ const resultWithRest = () => {
 
 /** Every app-wide command. Panels only render; behavior lives here and in actions.ts. */
 export function registerAppCommands(): () => void {
-  const commands: Command[] = [
+  const commands: Omit<Command, "titleKey" | "title">[] = [
     // Navigate
     {
       id: "search.findAction",
-      title: "Find Action",
       category: "Navigate",
       keybinding: "$mod+Shift+KeyA",
       keywords: ["command palette"],
@@ -102,7 +102,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "navigate.table",
-      title: "Go to Table",
       category: "Navigate",
       keybinding: "$mod+KeyO",
       run: () => useSearchEverywhere.getState().show("tables"),
@@ -111,7 +110,6 @@ export function registerAppCommands(): () => void {
     // Data sources
     {
       id: "datasource.new",
-      title: "New Data Source",
       category: "Data Source",
       keybinding: "$mod+KeyN",
       keywords: ["add", "connection"],
@@ -119,7 +117,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "datasource.edit",
-      title: "Data Source Properties",
       category: "Data Source",
       keybinding: "$mod+Semicolon",
       keywords: ["edit"],
@@ -131,14 +128,12 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "datasource.connect",
-      title: "Connect",
       category: "Data Source",
       enabled: () => !!contextDataSourceId() && !isConnected(contextDataSourceId()),
       run: () => sources().connect(contextDataSourceId()!),
     },
     {
       id: "datasource.disconnect",
-      title: "Disconnect",
       category: "Data Source",
       enabled: () => isConnected(contextDataSourceId()),
       run: async () => {
@@ -148,17 +143,16 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "datasource.delete",
-      title: "Delete Data Source",
       category: "Data Source",
       enabled: () => selection()?.kind === "dataSource",
       run: async () => {
         const id = selection()?.sourceId;
         const source = sources().sources.find((s) => s.id === id);
         if (!source) return;
-        const confirmed = await ask(`Delete data source "${source.name}"? Its saved password is removed too.`, {
-          title: "Delete Data Source",
+        const confirmed = await ask(t("datasource.delete.confirm", { name: source.name }), {
+          title: t("command.datasource.delete"),
           kind: "warning",
-          okLabel: "Delete",
+          okLabel: t("common.delete"),
         });
         if (confirmed && (await confirmForDataSource(source.id, "delete the data source"))) await sources().remove(source.id);
       },
@@ -167,7 +161,6 @@ export function registerAppCommands(): () => void {
     // Explorer
     {
       id: "explorer.refresh",
-      title: "Refresh",
       category: "Database Explorer",
       keybinding: "$mod+Alt+KeyY",
       keywords: ["reload", "synchronize", "introspect"],
@@ -176,7 +169,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "explorer.openData",
-      title: "Open Table Data",
       category: "Database Explorer",
       keybinding: "F4",
       enabled: () => selection()?.kind === "table" || selection()?.kind === "column",
@@ -187,7 +179,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "explorer.copyName",
-      title: "Copy Qualified Name",
       category: "Database Explorer",
       keybinding: "$mod+Alt+Shift+KeyC",
       enabled: () => selection()?.kind === "table" || selection()?.kind === "column",
@@ -202,7 +193,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "explorer.toggleSystemSchemas",
-      title: "Show System Schemas",
       category: "Database Explorer",
       keywords: ["pg_catalog", "information_schema", "hide"],
       run: () => sources().toggleSystemSchemas(),
@@ -211,14 +201,12 @@ export function registerAppCommands(): () => void {
     // Console
     {
       id: "console.new",
-      title: "New Query Console",
       category: "Console",
       keybinding: "$mod+Shift+KeyL",
       run: () => newConsole(),
     },
     {
       id: "console.execute",
-      title: "Execute Statement",
       category: "Console",
       keybinding: "$mod+Enter",
       keywords: ["run", "query"],
@@ -233,7 +221,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "console.cancel",
-      title: "Cancel Running Statement",
       category: "Console",
       keybinding: "$mod+F2",
       keywords: ["stop", "abort"],
@@ -247,7 +234,6 @@ export function registerAppCommands(): () => void {
     // Transactions
     {
       id: "transaction.commit",
-      title: "Commit",
       category: "Transaction",
       keybinding: "$mod+Alt+Enter",
       keywords: ["transaction", "tx"],
@@ -259,7 +245,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "transaction.rollback",
-      title: "Rollback",
       category: "Transaction",
       keybinding: "$mod+Alt+Shift+KeyZ",
       keywords: ["transaction", "tx", "undo"],
@@ -271,7 +256,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "transaction.toggleMode",
-      title: "Toggle Manual Transaction Mode",
       category: "Transaction",
       keywords: ["tx", "auto-commit", "autocommit", "auto", "manual"],
       enabled: () => !!activeConsole(),
@@ -283,7 +267,6 @@ export function registerAppCommands(): () => void {
 
     {
       id: "editor.gotoDeclaration",
-      title: "Go to Declaration",
       category: "Navigate",
       keybinding: "$mod+KeyB",
       context: "editor",
@@ -299,7 +282,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "editor.reformat",
-      title: "Reformat Code",
       category: "Console",
       keybinding: "$mod+Alt+KeyL",
       context: "editor",
@@ -312,7 +294,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "console.history",
-      title: "Query History",
       category: "Console",
       keybinding: "$mod+Alt+KeyE",
       keywords: ["recent", "previous", "queries"],
@@ -326,7 +307,6 @@ export function registerAppCommands(): () => void {
     // Data editor: a table's rows in a console
     {
       id: "grid.submit",
-      title: "Submit Changes",
       category: "Data Editor",
       keybinding: "$mod+Enter",
       context: "grid",
@@ -344,7 +324,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "grid.revertSelected",
-      title: "Revert Selected Changes",
       category: "Data Editor",
       keybinding: "$mod+Alt+KeyZ",
       context: "grid",
@@ -353,7 +332,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "grid.revertAll",
-      title: "Revert All Changes",
       category: "Data Editor",
       keywords: ["discard"],
       enabled: () => pendingChanges() > 0,
@@ -361,7 +339,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "grid.addRow",
-      title: "Add Row",
       category: "Data Editor",
       keybinding: "$mod+KeyN",
       context: "grid",
@@ -371,7 +348,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "grid.duplicateRows",
-      title: "Duplicate Rows",
       category: "Data Editor",
       keybinding: "$mod+KeyD",
       context: "grid",
@@ -381,7 +357,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "grid.deleteRows",
-      title: "Delete Rows",
       category: "Data Editor",
       keybinding: "$mod+Backspace",
       context: "grid",
@@ -391,7 +366,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "grid.setNull",
-      title: "Set NULL",
       category: "Data Editor",
       keybinding: "$mod+Alt+KeyN",
       context: "grid",
@@ -400,7 +374,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "grid.filter",
-      title: "Filter Rows",
       category: "Data Editor",
       keybinding: "$mod+KeyF",
       context: "grid",
@@ -410,7 +383,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "grid.goToReferenced",
-      title: "Go to Referenced Row",
       category: "Data Editor",
       keybinding: "$mod+KeyB",
       context: "grid",
@@ -422,7 +394,6 @@ export function registerAppCommands(): () => void {
     // Results
     {
       id: "grid.copy",
-      title: "Copy",
       category: "Results",
       keybinding: "$mod+KeyC",
       context: "grid",
@@ -432,13 +403,12 @@ export function registerAppCommands(): () => void {
     },
     ...(
       [
-        ["grid.copyCsv", "Copy as CSV", "csv"],
-        ["grid.copyJson", "Copy as JSON", "json"],
-        ["grid.copyInserts", "Copy as SQL INSERT", "sql"],
+        ["grid.copyCsv", "csv"],
+        ["grid.copyJson", "json"],
+        ["grid.copyInserts", "sql"],
       ] as const
-    ).map(([id, title, format]) => ({
+    ).map(([id, format]) => ({
       id,
-      title,
       category: "Results",
       keywords: ["clipboard"],
       enabled: hasGridSelection,
@@ -446,13 +416,12 @@ export function registerAppCommands(): () => void {
     })),
     ...(
       [
-        ["grid.exportCsv", "Export Data to CSV…", "csv"],
-        ["grid.exportJson", "Export Data to JSON…", "json"],
-        ["grid.exportSql", "Export Data to SQL INSERT…", "sql"],
+        ["grid.exportCsv", "csv"],
+        ["grid.exportJson", "json"],
+        ["grid.exportSql", "sql"],
       ] as const
-    ).map(([id, title, format]) => ({
+    ).map(([id, format]) => ({
       id,
-      title,
       category: "Results",
       keywords: ["save", "file", "download"],
       enabled: () => {
@@ -463,7 +432,6 @@ export function registerAppCommands(): () => void {
     })),
     {
       id: "results.fetchNext",
-      title: "Fetch Next Page",
       category: "Results",
       keywords: ["more rows", "load", "paginate"],
       enabled: () => resultWithRest() !== undefined,
@@ -474,7 +442,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "results.fetchAll",
-      title: "Fetch All Rows",
       category: "Results",
       keywords: ["more rows", "load", "everything"],
       enabled: () => resultWithRest() !== undefined,
@@ -485,7 +452,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "results.closeResultSet",
-      title: "Close Result Set",
       category: "Results",
       keywords: ["release", "cursor", "stop fetching"],
       enabled: () => resultWithRest() !== undefined,
@@ -496,14 +462,12 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "results.pageSize",
-      title: "Result Page Size…",
       category: "Results",
       keywords: ["fetch size", "rows", "limit", "settings"],
       run: () => useFetchSettings.setState({ dialogOpen: true }),
     },
     {
       id: "grid.valueViewer",
-      title: "Value Viewer",
       category: "View",
       keybinding: "$mod+Alt+KeyV",
       keywords: ["cell", "json", "inspect"],
@@ -513,14 +477,12 @@ export function registerAppCommands(): () => void {
     // View
     {
       id: "view.toolWindow.explorer",
-      title: "Database Explorer",
       category: "View",
       keybinding: "$mod+Digit1",
       run: toggleExplorer,
     },
     {
       id: "view.toolWindow.mcp",
-      title: "MCP",
       category: "View",
       // IntelliJ's Services key: the tool window of a server IdeDB runs.
       keybinding: "$mod+Digit8",
@@ -529,7 +491,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "view.closeTab",
-      title: "Close Tab",
       category: "Workbench",
       keybinding: "$mod+KeyW",
       enabled: hasActivePanel,
@@ -537,7 +498,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "app.quit",
-      title: "Quit IdeDB",
       category: "Application",
       keybinding: "$mod+KeyQ",
       keywords: ["exit", "close"],
@@ -545,7 +505,6 @@ export function registerAppCommands(): () => void {
     },
     {
       id: "view.resetLayout",
-      title: "Restore Default Layout",
       category: "View",
       keywords: ["reset", "windows"],
       run: restoreDefaultLayout,
@@ -554,28 +513,24 @@ export function registerAppCommands(): () => void {
     // MCP server
     {
       id: "mcp.toggleServer",
-      title: "Toggle MCP Server",
       category: "MCP",
       keywords: ["start", "stop", "enable", "disable", "ai", "llm", "model context protocol"],
       run: toggleServer,
     },
     {
       id: "mcp.newClient",
-      title: "New MCP Client",
       category: "MCP",
       keywords: ["add", "token", "claude", "cursor", "ai", "llm", "agent"],
       run: openNewClient,
     },
     {
       id: "mcp.showActivity",
-      title: "Show MCP Activity",
       category: "MCP",
       keywords: ["audit", "log", "history", "queries", "statements", "ai", "llm", "agent"],
       run: () => showMcp("activity"),
     },
     {
       id: "mcp.showApprovals",
-      title: "Show Pending Approvals",
       category: "MCP",
       keywords: ["approve", "reject", "write", "waiting"],
       enabled: () => useMcp.getState().approvals.requests.length > 0,
@@ -585,19 +540,38 @@ export function registerAppCommands(): () => void {
     // Appearance
     ...(["system", "light", "dark"] as const).map((preference) => ({
       id: `appearance.theme.${preference}`,
-      title: `Theme: ${preference[0].toUpperCase()}${preference.slice(1)}`,
       category: "Appearance",
       keywords: ["color scheme", "dark mode"],
       run: () => useTheme.getState().setPreference(preference),
     })),
     {
       id: "appearance.translucentSidebar",
-      title: "Toggle Translucent Sidebar",
       category: "Appearance",
       keywords: ["vibrancy", "transparency", "glass"],
       run: () => useTranslucentSidebar.getState().toggle(),
     },
+
+    // Language: System, then one command per translation file.
+    {
+      id: "appearance.language.system",
+      category: "Appearance",
+      keywords: ["language", "idioma", "locale", "translation"],
+      run: () => useLanguage.getState().setPreference("system"),
+    },
   ];
 
-  return registerCommands(commands);
+  const localized: Command[] = commands.map((c) => ({ ...c, titleKey: `command.${c.id}` as MessageKey }));
+  for (const [code, { name }] of Object.entries(LOCALES)) {
+    localized.push({
+      id: `appearance.language.${code}`,
+      get title() {
+        return t("command.appearance.language.named", { language: name });
+      },
+      category: "Appearance",
+      keywords: ["language", "idioma", "locale", "translation"],
+      run: () => useLanguage.getState().setPreference(code),
+    });
+  }
+
+  return registerCommands(localized);
 }

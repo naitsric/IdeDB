@@ -12,6 +12,7 @@ import { armed, armsIn, closedGate, currentRequest, rearm, showRequest } from ".
 import { WARNING_LABEL, WRITE_KIND_LABEL } from "./labels";
 import { clientInfoLabel, formatCountdown } from "./presence";
 import { answerApproval, hideApprovals, stepApproval, useMcp } from "./store";
+import { useT } from "../i18n";
 
 /** The countdown turns red this close to the end. */
 const URGENT_MS = 15_000;
@@ -43,6 +44,7 @@ export function ApprovalDialog() {
 }
 
 function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; index: number; total: number }) {
+  const t = useT();
   useKeymapHold();
   const source = useDataSources((s) => s.sources.find((x) => x.id === request.dataSourceId));
   const now = useNow(1000);
@@ -106,18 +108,18 @@ function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; in
       open
       onClose={hideApprovals}
       width={640}
-      title={`${request.clientName} wants to run ${request.summary}`}
-      description="It runs only if you approve it."
+      title={t("mcp.approval.title", { client: request.clientName, summary: request.summary })}
+      description={t("mcp.approval.description")}
       aside={
         total > 1 && (
           <div className="flex shrink-0 items-center gap-0.5 text-[12px] text-muted tabular-nums">
-            <IconButton label="Previous request" disabled={index === 0} onClick={() => stepApproval(-1)}>
+            <IconButton label={t("mcp.approval.previous")} disabled={index === 0} onClick={() => stepApproval(-1)}>
               <ChevronLeft className="size-4" />
             </IconButton>
             <span aria-live="polite">
-              {index + 1} of {total}
+              {t("mcp.approval.position", { index: index + 1, total })}
             </span>
-            <IconButton label="Next request" disabled={index === total - 1} onClick={() => stepApproval(1)}>
+            <IconButton label={t("mcp.approval.next")} disabled={index === total - 1} onClick={() => stepApproval(1)}>
               <ChevronRight className="size-4" />
             </IconButton>
           </div>
@@ -138,15 +140,15 @@ function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; in
             )}
           >
             <Clock className="size-3.5" />
-            {expired ? "Expired" : `Expires in ${formatCountdown(left)}`}
+            {expired ? t("mcp.approval.expired") : t("mcp.approval.expires", { time: formatCountdown(left) })}
           </span>
           <div className="ml-auto flex gap-2">
             <Button
               variant="ghost"
-              title="Answer later: it keeps waiting until it expires (Esc)"
+              title={t("mcp.approval.laterHint")}
               onClick={hideApprovals}
             >
-              Later
+              {t("mcp.approval.later")}
             </Button>
             <Button
               ref={rejectButton}
@@ -155,7 +157,7 @@ function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; in
               // A key press (detail 0) counts only once armed; a click always does.
               onClick={(e) => (e.detail > 0 || isArmed()) && void answer(false)}
             >
-              Reject
+              {t("mcp.approval.reject")}
             </Button>
             <Button
               variant="primary"
@@ -166,7 +168,7 @@ function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; in
               onClick={() => isArmed() && void answer(true)}
             >
               <Check className="size-3.5" />
-              Approve
+              {t("mcp.approval.approve")}
             </Button>
           </div>
         </>
@@ -174,20 +176,20 @@ function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; in
     >
       <div className="flex flex-col gap-3">
         <dl className="grid grid-cols-[92px_1fr] items-baseline gap-x-3 gap-y-2 text-[12.5px]">
-          <Row label="Client">
+          <Row label={t("mcp.activity.client")}>
             <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
               <span className="font-medium text-fg">{request.clientName}</span>
-              <span className="flex items-center gap-1 text-[11.5px] text-success" title="Its token is registered in IdeDB">
-                <ShieldCheck className="size-3.5" /> Verified token
+              <span className="flex items-center gap-1 text-[11.5px] text-success" title={t("mcp.detail.tokenHint")}>
+                <ShieldCheck className="size-3.5" /> {t("mcp.detail.verified")}
               </span>
             </span>
             {reportedBy && (
               <span className="mt-0.5 block text-[11.5px] text-subtle">
-                Reported by the client, unverified: <span className="selectable text-muted">{reportedBy}</span>
+                {t("mcp.approval.reportedBy")} <span className="selectable text-muted">{reportedBy}</span>
               </span>
             )}
           </Row>
-          <Row label="Data source">
+          <Row label={t("mcp.activity.dataSource")}>
             <span className="flex items-center gap-1.5">
               <span
                 className="size-2 shrink-0 rounded-full border border-border-strong"
@@ -197,14 +199,14 @@ function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; in
               <span className="font-medium text-fg">{request.dataSourceName}</span>
             </span>
           </Row>
-          <Row label="Statement">
+          <Row label={t("mcp.detail.statement")}>
             <span className="font-medium text-fg">{request.summary}</span>
             <span className="text-muted"> · {WRITE_KIND_LABEL[request.writeKind]}</span>
           </Row>
           {request.reason && (
-            <Row label="Reason">
+            <Row label={t("mcp.detail.reason")}>
               <span className="selectable block text-fg">“{request.reason}”</span>
-              <span className="mt-0.5 block text-[11.5px] text-subtle">Given by the client</span>
+              <span className="mt-0.5 block text-[11.5px] text-subtle">{t("mcp.approval.givenByClient")}</span>
             </Row>
           )}
         </dl>
@@ -220,7 +222,7 @@ function ApprovalSheet({ request, index, total }: { request: ApprovalRequest; in
           </ul>
         )}
 
-        <SqlViewer sql={request.sql} engine={source?.params.engine} label="Statement to approve" />
+        <SqlViewer sql={request.sql} engine={source?.params.engine} label={t("mcp.approval.sqlLabel")} />
       </div>
     </Modal>
   );

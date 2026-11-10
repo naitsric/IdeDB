@@ -10,6 +10,7 @@ import {
 } from "dockview-react";
 import type { FunctionComponent } from "react";
 import { useConsoles } from "../db/consoles";
+import { t, useLanguage } from "../i18n";
 import { McpPanel } from "../mcp/McpPanel";
 import { setMcpTab, type McpTab } from "../mcp/store";
 import {
@@ -69,7 +70,7 @@ function addWelcome(dockview: DockviewApi) {
   dockview.addPanel({
     id: WELCOME_PANEL_ID,
     component: "welcome",
-    title: "Welcome",
+    title: t("welcome.title"),
     position: explorer ? { referencePanel: explorer, direction: "right" } : undefined,
   });
 }
@@ -79,7 +80,7 @@ export function addExplorer(dockview: DockviewApi) {
   return dockview.addPanel({
     id: EXPLORER_PANEL_ID,
     component: "explorer",
-    title: "Database Explorer",
+    title: t("command.view.toolWindow.explorer"),
     position: anchor ? { referencePanel: anchor, direction: "left" } : undefined,
     initialWidth: 300,
   });
@@ -92,7 +93,7 @@ function addMcp(dockview: DockviewApi) {
   return dockview.addPanel({
     id: MCP_PANEL_ID,
     component: "mcp",
-    title: "MCP",
+    title: t("command.view.toolWindow.mcp"),
     position: anchor
       ? { referencePanel: anchor, direction: "below" }
       : explorer
@@ -148,10 +149,18 @@ export function restoreDefaultLayout() {
   addExplorer(api);
 }
 
+/** Tool window titles are stored with the layout and set when created: bring them to the active language. */
+function retitleToolWindows(dockview: DockviewApi) {
+  dockview.getPanel(WELCOME_PANEL_ID)?.api.setTitle(t("welcome.title"));
+  dockview.getPanel(EXPLORER_PANEL_ID)?.api.setTitle(t("command.view.toolWindow.explorer"));
+  dockview.getPanel(MCP_PANEL_ID)?.api.setTitle(t("command.view.toolWindow.mcp"));
+}
+
 export function Workbench() {
   const onReady = ({ api: dockview }: DockviewReadyEvent) => {
     api = dockview;
     attachDockview(dockview);
+    useLanguage.subscribe(() => retitleToolWindows(dockview));
 
     try {
       const saved = localStorage.getItem(LAYOUT_STORAGE_KEY);
@@ -166,6 +175,7 @@ export function Workbench() {
       if (!useConsoles.getState().consoles[panel.id.slice("console:".length)]) panel.api.close();
     }
     if (!editorAnchor(dockview)) addWelcome(dockview);
+    retitleToolWindows(dockview);
 
     dockview.onDidActivePanelChange(({ panel }) => {
       if (panel?.id.startsWith("console:")) {

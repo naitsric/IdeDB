@@ -1,3 +1,4 @@
+import { t, useLanguage } from "../i18n";
 import type { McpClient } from "./api";
 
 /**
@@ -11,8 +12,9 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-const shortDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
-const longDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
+const shortDate = () => new Intl.DateTimeFormat(useLanguage.getState().locale, { month: "short", day: "numeric" });
+const longDate = () =>
+  new Intl.DateTimeFormat(useLanguage.getState().locale, { month: "short", day: "numeric", year: "numeric" });
 
 export function isOnline(lastSeenAt: string | null, now: number): boolean {
   if (!lastSeenAt) return false;
@@ -24,31 +26,31 @@ export function isOnline(lastSeenAt: string | null, now: number): boolean {
 /** `Sep 28`, or `Sep 28, 2025` outside the current year. */
 export function formatDay(iso: string, now: number): string {
   const date = new Date(iso);
-  return (date.getFullYear() === new Date(now).getFullYear() ? shortDate : longDate).format(date);
+  return (date.getFullYear() === new Date(now).getFullYear() ? shortDate() : longDate()).format(date);
 }
 
 /** `Online`, `Last seen 5 min ago`, `Last seen yesterday`, `Never connected`… */
 export function presenceLabel(lastSeenAt: string | null, now: number): string {
-  if (!lastSeenAt) return "Never connected";
-  if (isOnline(lastSeenAt, now)) return "Online";
-  return `Last seen ${ago(Date.parse(lastSeenAt), now)}`;
+  if (!lastSeenAt) return t("presence.never");
+  if (isOnline(lastSeenAt, now)) return t("presence.online");
+  return t("presence.lastSeen", { ago: ago(Date.parse(lastSeenAt), now) });
 }
 
 /** How long ago `at` was, in the coarsest unit that still says something. */
 export function ago(at: number, now: number): string {
   const age = Math.max(0, now - at);
-  if (age < MINUTE) return "just now";
-  if (age < HOUR) return `${Math.floor(age / MINUTE)} min ago`;
-  if (age < DAY) return `${Math.floor(age / HOUR)} h ago`;
-  if (age < 2 * DAY) return "yesterday";
-  if (age < 7 * DAY) return `${Math.floor(age / DAY)} days ago`;
+  if (age < MINUTE) return t("presence.justNow");
+  if (age < HOUR) return t("presence.minutesAgo", { count: Math.floor(age / MINUTE) });
+  if (age < DAY) return t("presence.hoursAgo", { count: Math.floor(age / HOUR) });
+  if (age < 2 * DAY) return t("presence.yesterday");
+  if (age < 7 * DAY) return t("presence.daysAgo", { count: Math.floor(age / DAY) });
   return formatDay(new Date(at).toISOString(), now);
 }
 
 /** The short form, for lists: `Online`, `5 min ago`, `Sep 11`, `Never`. */
 export function presenceShort(lastSeenAt: string | null, now: number): string {
-  if (!lastSeenAt) return "Never";
-  return isOnline(lastSeenAt, now) ? "Online" : ago(Date.parse(lastSeenAt), now);
+  if (!lastSeenAt) return t("presence.neverShort");
+  return isOnline(lastSeenAt, now) ? t("presence.online") : ago(Date.parse(lastSeenAt), now);
 }
 
 /** Clients not revoked and seen recently. */

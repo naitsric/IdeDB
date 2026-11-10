@@ -1,6 +1,7 @@
 import * as Menu from "@radix-ui/react-context-menu";
 import type { ReactNode } from "react";
-import { executeCommand, isEnabled, useCommands } from "../commands/registry";
+import { commandTitle, executeCommand, isEnabled, useCommands } from "../commands/registry";
+import { useLocale } from "../i18n";
 import { Kbd } from "./primitives";
 
 export const ContextMenuRoot = Menu.Root;
@@ -39,6 +40,7 @@ export function ContextMenuItem({
 /** A menu item bound to a registered command: same title, shortcut and enablement everywhere. */
 export function CommandItem({ id, label }: { id: string; label?: string }) {
   const command = useCommands((s) => s.commands[id]);
+  useLocale(); // re-render in the new language
   if (!command) return null;
   return (
     <Menu.Item
@@ -46,7 +48,7 @@ export function CommandItem({ id, label }: { id: string; label?: string }) {
       onSelect={() => executeCommand(id)}
       className={itemClass}
     >
-      <span>{label ?? command.title}</span>
+      <span>{label ?? commandTitle(command)}</span>
       {command.keybinding && <Kbd binding={command.keybinding} />}
     </Menu.Item>
   );

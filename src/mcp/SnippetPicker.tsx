@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { cx, IconButton, Segmented } from "../ui/primitives";
 import { mcpApi } from "./api";
 import { INSTALLED_BRIDGE_COMMAND, snippets, type SnippetId } from "./snippets";
+import { useT } from "../i18n";
 
 /** How long a copy button shows it copied. */
 const COPIED_MS = 1500;
@@ -43,7 +44,8 @@ function useBridgeCommand(): string {
 }
 
 /** Copies `text` to the clipboard, and says so for a moment. */
-export function CopyButton({ text, label = "Copy", className }: { text: string; label?: string; className?: string }) {
+export function CopyButton({ text, label, className }: { text: string; label?: string; className?: string }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -53,7 +55,7 @@ export function CopyButton({ text, label = "Copy", className }: { text: string; 
 
   return (
     <IconButton
-      label={copied ? "Copied" : label}
+      label={copied ? t("mcp.copied") : (label ?? t("mcp.copy"))}
       className={className}
       onClick={async () => {
         await navigator.clipboard.writeText(text);
@@ -67,6 +69,7 @@ export function CopyButton({ text, label = "Copy", className }: { text: string; 
 
 /** Text to paste somewhere, selectable, with a copy button. */
 export function CodeBlock({ text, label, className }: { text: string; label: string; className?: string }) {
+  const t = useT();
   return (
     <div className={cx("relative rounded-md border border-border bg-inset", className)}>
       <pre
@@ -75,13 +78,14 @@ export function CodeBlock({ text, label, className }: { text: string; label: str
       >
         {text}
       </pre>
-      <CopyButton text={text} label={`Copy ${label}`} className="absolute top-1 right-1 bg-inset" />
+      <CopyButton text={text} label={t("mcp.copyLabel", { label })} className="absolute top-1 right-1 bg-inset" />
     </div>
   );
 }
 
 /** What to paste into each kind of client, for the server on `port`. */
 export function SnippetPicker({ port, token }: { port: number; token?: string }) {
+  const t = useT();
   const all = snippets(port, token, useBridgeCommand());
   const [id, setId] = useState<SnippetId>("claudeCode");
   const snippet = all.find((s) => s.id === id) ?? all[0];
@@ -90,7 +94,7 @@ export function SnippetPicker({ port, token }: { port: number; token?: string })
     <div className="flex flex-col gap-2">
       <div className="flex min-w-0 items-center gap-3">
         <Segmented
-          label="MCP client"
+          label={t("mcp.snippet.client")}
           value={snippet.id}
           options={all.map((s) => ({ value: s.id, label: s.label }))}
           onChange={setId}
@@ -105,7 +109,7 @@ export function SnippetPicker({ port, token }: { port: number; token?: string })
           <CodeBlock
             key={s.id}
             text={s.text}
-            label={`${s.label} configuration`}
+            label={t("mcp.snippet.configuration", { name: s.label })}
             className={cx("col-start-1 row-start-1", s.id !== snippet.id && "invisible")}
           />
         ))}

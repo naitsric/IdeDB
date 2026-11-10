@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { EngineIcon } from "../ui/EngineIcon";
+import { useT } from "../i18n";
 import { inputClass, Modal } from "../ui/Modal";
 import { Button } from "../ui/primitives";
 import { useDialogs } from "./dialogs";
 
 /** Asks for the password of a data source that does not save it. */
 export function PasswordPrompt() {
+  const t = useT();
   const request = useDialogs((s) => s.password);
   const [password, setPassword] = useState("");
   if (!request) return null;
@@ -15,13 +17,13 @@ export function PasswordPrompt() {
     setPassword("");
     resolve(value);
   };
-  const target = `${source.params.user || "(no user)"}@${source.params.host || "localhost"}`;
+  const target = `${source.params.user || t("password.noUser")}@${source.params.host || "localhost"}`;
 
   return (
     <Modal
       open
       onClose={() => finish(null)}
-      title={`Connect to ${source.name}`}
+      title={t("password.title", { name: source.name })}
       description={
         <span className="flex items-center gap-1.5">
           <EngineIcon engine={source.params.engine} /> {target}
@@ -31,10 +33,10 @@ export function PasswordPrompt() {
       footer={
         <div className="ml-auto flex gap-2">
           <Button variant="ghost" onClick={() => finish(null)}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button variant="primary" onClick={() => finish(password)}>
-            Connect
+            {t("command.datasource.connect")}
           </Button>
         </div>
       }
@@ -48,13 +50,13 @@ export function PasswordPrompt() {
         <input
           autoFocus
           type="password"
-          aria-label="Password"
-          placeholder="Password"
+          aria-label={t("datasource.dialog.password")}
+          placeholder={t("datasource.dialog.password")}
           className={inputClass}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        <p className="mt-2 text-[11.5px] text-subtle">Remembered until IdeDB quits.</p>
+        <p className="mt-2 text-[11.5px] text-subtle">{t("password.remembered")}</p>
       </form>
     </Modal>
   );

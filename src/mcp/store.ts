@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
+import { t } from "../i18n";
 import { errorMessage } from "../db/api";
 import {
   addLive,
@@ -177,7 +178,7 @@ export async function toggleServer() {
     const settings = get().settings ?? (await mcpApi.settings());
     await saveSettings({ ...settings, enabled: !settings.enabled });
   } catch (e) {
-    await showError("Couldn't change the MCP server", e);
+    await showError(t("mcp.err.changeServer"), e);
   }
 }
 
@@ -186,7 +187,7 @@ export async function retryServer() {
   try {
     await saveSettings(get().settings ?? (await mcpApi.settings()));
   } catch (e) {
-    await showError("Couldn't start the MCP server", e);
+    await showError(t("mcp.err.startServer"), e);
   }
 }
 
@@ -233,9 +234,8 @@ export async function renameClient(id: string, name: string) {
 
 export async function regenerateToken(client: McpClient) {
   const confirmed = await ask(
-    "The current token stops working at once, and any write it sent that waits for approval is withdrawn. " +
-      "The client needs the new token to connect again.",
-    { title: `Regenerate the token of "${client.name}"?`, kind: "warning", okLabel: "Regenerate" },
+    t("mcp.confirm.regenerate.message"),
+    { title: t("mcp.confirm.regenerate.title", { name: client.name }), kind: "warning", okLabel: t("mcp.confirm.regenerate.ok") },
   );
   if (!confirmed) return;
   try {
@@ -243,28 +243,27 @@ export async function regenerateToken(client: McpClient) {
     replaceClient(rotated);
     set({ dialog: { kind: "token", client: rotated, token, regenerated: true } });
   } catch (e) {
-    await showError("Couldn't regenerate the token", e);
+    await showError(t("mcp.err.regenerate"), e);
   }
 }
 
 export async function revokeClient(client: McpClient) {
   const confirmed = await ask(
-    "Its token stops working at once, and any write it sent that waits for approval is withdrawn. " +
-      "It stays in the list, and its activity in the log.",
-    { title: `Revoke "${client.name}"?`, kind: "warning", okLabel: "Revoke" },
+    t("mcp.confirm.revoke.message"),
+    { title: t("mcp.confirm.revoke.title", { name: client.name }), kind: "warning", okLabel: t("mcp.confirm.revoke.ok") },
   );
   if (!confirmed) return;
   try {
     replaceClient(await mcpApi.revokeClient(client.id));
   } catch (e) {
-    await showError("Couldn't revoke the client", e);
+    await showError(t("mcp.err.revoke"), e);
   }
 }
 
 export async function deleteClient(client: McpClient) {
   const confirmed = await ask(
-    "Its token stops working at once and its access is removed. Its activity stays in the log.",
-    { title: `Delete "${client.name}"?`, kind: "warning", okLabel: "Delete" },
+    t("mcp.confirm.delete.message"),
+    { title: t("mcp.confirm.delete.title", { name: client.name }), kind: "warning", okLabel: t("common.delete") },
   );
   if (!confirmed) return;
   try {
@@ -274,7 +273,7 @@ export async function deleteClient(client: McpClient) {
       selectedClientId: state.selectedClientId === client.id ? null : state.selectedClientId,
     }));
   } catch (e) {
-    await showError("Couldn't delete the client", e);
+    await showError(t("mcp.err.delete"), e);
   }
 }
 
@@ -288,7 +287,7 @@ export async function setAccess(clientId: string, dataSourceId: string, level: G
     replaceClient(await mcpApi.setGrants(clientId, grants));
   } catch (e) {
     replaceClient(before);
-    await showError("Couldn't change the client's access", e);
+    await showError(t("mcp.err.access"), e);
   }
 }
 
@@ -301,7 +300,7 @@ export async function setNeverWrite(dataSourceId: string, value: boolean) {
     await mcpApi.setNeverWrite(dataSourceId, value);
   } catch (e) {
     set({ neverWrite: before });
-    await showError("Couldn't change never write", e);
+    await showError(t("mcp.err.neverWrite"), e);
   }
 }
 
@@ -384,7 +383,7 @@ export async function answerApproval(id: number, approve: boolean) {
     await mcpApi.answerApproval(id, approve);
     set((state) => ({ approvals: resolveRequest(state.approvals, id) }));
   } catch (e) {
-    await showError("Couldn't answer the approval", e);
+    await showError(t("mcp.err.approval"), e);
   }
 }
 

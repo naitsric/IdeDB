@@ -1,4 +1,5 @@
 import { LoaderCircle, Pin, X } from "lucide-react";
+import { useT } from "../../i18n";
 import { useConsoles, type ResultMeta } from "../../db/consoles";
 import { cx } from "../../ui/primitives";
 
@@ -15,10 +16,11 @@ export function ResultTabs({
   results: ResultMeta[];
   activeResultId?: number;
 }) {
+  const t = useT();
   const { selectResult, togglePin, closeResult } = useConsoles.getState();
 
   return (
-    <div role="tablist" aria-label="Results" className="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border bg-bg">
+    <div role="tablist" aria-label={t("results.tabs")} className="flex h-8 shrink-0 items-stretch overflow-x-auto border-b border-border bg-bg">
       {results.map((result) => {
         const active = result.id === activeResultId;
         return (
@@ -39,8 +41,8 @@ export function ResultTabs({
             <span className="whitespace-nowrap">{result.title}</span>
             <button
               type="button"
-              aria-label={result.pinned ? "Unpin tab" : "Pin tab"}
-              title={result.pinned ? "Unpin" : "Pin: keep this result when running again"}
+              aria-label={result.pinned ? t("results.unpinTab") : t("results.pinTab")}
+              title={result.pinned ? t("results.unpin") : t("results.pin")}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={() => togglePin(consoleId, result.id)}
               className={cx(
@@ -52,8 +54,8 @@ export function ResultTabs({
             </button>
             <button
               type="button"
-              aria-label="Close tab"
-              title="Close"
+              aria-label={t("results.closeTab")}
+              title={t("results.close")}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={() => void closeResult(consoleId, result.id)}
               className="flex size-5 items-center justify-center rounded text-subtle opacity-0 group-hover:opacity-100 hover:bg-active hover:text-fg"

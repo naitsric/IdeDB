@@ -1,5 +1,6 @@
 import { ask } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
+import { t } from "../i18n";
 import { api, errorMessage, type Column, type SessionId, type TableRef, type Value } from "./api";
 import { invalidateChecks } from "./checkRevisions";
 import { openSessionFor, useDataSources } from "./dataSources";
@@ -13,11 +14,19 @@ import type { TableFilter } from "./sql";
  * Console text persists across launches; results do not.
  */
 
+/** The tab title, built when shown so it follows the active language. */
+export function resultTitle(result: Pick<ResultMeta, "title" | "ordinal">, translate: typeof t = t): string {
+  return result.title ?? translate("results.defaultTitle", { count: result.ordinal });
+}
+
 export type ResultStatus = "running" | "done" | "cancelled" | "error";
 
 export interface ResultMeta {
   id: number;
-  title: string;
+  /** An explicit title; without one the tab shows "Result {ordinal}" in the active language. */
+  title?: string;
+  /** Number of the result within its console, for the default title. */
+  ordinal: number;
   pinned: boolean;
   sql: string;
   status: ResultStatus;
@@ -223,11 +232,11 @@ export function setExecutionHooks(hooks: ExecutionHooks) {
 
 /** The one place that asks before unsubmitted changes are thrown away. */
 async function confirmDiscard(count: number): Promise<boolean> {
-  return ask("They have not been submitted and will be lost.", {
-    title: `Discard ${count} pending ${count === 1 ? "change" : "changes"}?`,
+  return ask(t("discard.message"), {
+    title: t(count === 1 ? "discard.title.one" : "discard.title.many", { count }),
     kind: "warning",
-    okLabel: "Discard",
-    cancelLabel: "Keep Editing",
+    okLabel: t("discard.ok"),
+    cancelLabel: t("discard.keepEditing"),
   });
 }
 
@@ -293,9 +302,11 @@ export const useConsoles = create<ConsolesState>((set, get) => {
     if (!entry) return undefined;
     const replace = replacedResult(entry, newTab);
     const resultCount = replace ? entry.resultCount : entry.resultCount + 1;
+    const ordinal = replace ? replace.ordinal : resultCount;
     const result: ResultMeta = {
       id: ++nextResultId,
-      title: replace?.title ?? `Result ${resultCount}`,
+      title: replace?.title,
+      ordinal,
       pinned: false,
       sql,
       status: "running",

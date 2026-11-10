@@ -1,5 +1,6 @@
 import { Activity, Bot, Server, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, type ComponentType, type KeyboardEvent } from "react";
+import { useT, type MessageKey } from "../i18n";
 import { cx, StatusDot } from "../ui/primitives";
 import { ActivityTab } from "./ActivityTab";
 import { ClientsTab } from "./ClientsTab";
@@ -7,10 +8,10 @@ import { ServerTab } from "./ServerTab";
 import { serverState } from "./status";
 import { reloadClients, setMcpTab, useMcp, type McpTab } from "./store";
 
-const TABS: { id: McpTab; label: string; icon: LucideIcon }[] = [
-  { id: "activity", label: "Activity", icon: Activity },
-  { id: "clients", label: "Clients", icon: Bot },
-  { id: "server", label: "Server", icon: Server },
+const TABS: { id: McpTab; label: MessageKey; icon: LucideIcon }[] = [
+  { id: "activity", label: "mcp.tab.activity", icon: Activity },
+  { id: "clients", label: "mcp.tab.clients", icon: Bot },
+  { id: "server", label: "mcp.tab.server", icon: Server },
 ];
 
 const TAB_CONTENT: Record<McpTab, ComponentType> = {
@@ -25,6 +26,7 @@ const TAB_CONTENT: Record<McpTab, ComponentType> = {
  * it on.
  */
 export function McpPanel() {
+  const t = useT();
   const tab = useMcp((s) => s.tab);
   const tabs = useRef<HTMLDivElement>(null);
   const Content = TAB_CONTENT[tab];
@@ -46,7 +48,7 @@ export function McpPanel() {
   return (
     <div className="flex h-full flex-col bg-panel">
       <div className="flex h-8 shrink-0 items-stretch border-b border-border bg-bg">
-        <div ref={tabs} role="tablist" aria-label="MCP" className="flex items-stretch" onKeyDown={onKeyDown}>
+        <div ref={tabs} role="tablist" aria-label={t("command.view.toolWindow.mcp")} className="flex items-stretch" onKeyDown={onKeyDown}>
           {TABS.map(({ id, label, icon: Icon }) => {
             const active = id === tab;
             return (
@@ -65,7 +67,7 @@ export function McpPanel() {
                 )}
               >
                 <Icon className="size-3.5" />
-                {label}
+                {t(label)}
               </button>
             );
           })}

@@ -1,3 +1,4 @@
+import { formatNumber, t, useLanguage, type MessageKey } from "../i18n";
 import type { AuditEntry, AuditFilter, Decision } from "./api";
 
 /**
@@ -211,27 +212,31 @@ export function stepSelection(entries: readonly AuditEntry[], selectedId: number
 
 // What a row says
 
-const timeOfDay = new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
-const dayAndTime = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-const dayOfYear = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" });
-const fullTime = new Intl.DateTimeFormat("en-US", {
-  weekday: "short",
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  fractionalSecondDigits: 3,
-  hourCycle: "h23",
-  timeZoneName: "short",
-});
+const locale = () => useLanguage.getState().locale;
+const timeOfDay = () =>
+  new Intl.DateTimeFormat(locale(), { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+const dayAndTime = () =>
+  new Intl.DateTimeFormat(locale(), {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+const dayOfYear = () => new Intl.DateTimeFormat(locale(), { month: "short", day: "numeric", year: "numeric" });
+const fullTime = () =>
+  new Intl.DateTimeFormat(locale(), {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    fractionalSecondDigits: 3,
+    hourCycle: "h23",
+    timeZoneName: "short",
+  });
 
 const sameDay = (a: Date, b: Date) =>
   a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
@@ -240,13 +245,13 @@ const sameDay = (a: Date, b: Date) =>
 export function formatLogTime(iso: string, now: number): string {
   const date = new Date(iso);
   const today = new Date(now);
-  if (sameDay(date, today)) return timeOfDay.format(date);
-  return (date.getFullYear() === today.getFullYear() ? dayAndTime : dayOfYear).format(date);
+  if (sameDay(date, today)) return timeOfDay().format(date);
+  return (date.getFullYear() === today.getFullYear() ? dayAndTime() : dayOfYear()).format(date);
 }
 
 /** The full timestamp, to the millisecond and with the time zone, for tooltips and the detail. */
 export function formatFullTime(iso: string): string {
-  return fullTime.format(new Date(iso));
+  return fullTime().format(new Date(iso));
 }
 
 /** Characters of SQL a row's preview starts from; the row cuts it far sooner. */
@@ -269,37 +274,37 @@ export function consoleBlocker(
   entry: Pick<AuditEntry, "sql" | "dataSourceId" | "dataSourceName">,
   sourceExists: boolean,
 ): string | null {
-  if (entry.sql === null) return "This call ran no SQL.";
-  if (entry.dataSourceId === null) return "The call named no data source IdeDB knows.";
-  if (!sourceExists) return `The data source "${entry.dataSourceName ?? entry.dataSourceId}" no longer exists.`;
+  if (entry.sql === null) return t("mcp.activity.noSql");
+  if (entry.dataSourceId === null) return t("mcp.activity.noSource");
+  if (!sourceExists) return t("mcp.activity.sourceGone", { name: entry.dataSourceName ?? entry.dataSourceId });
   return null;
 }
 
 /** What the tools that run no SQL did. */
-const CALLED: Record<string, string> = {
-  list_connections: "Listed the data sources it may use",
-  list_schemas: "Listed schemas",
-  list_tables: "Listed tables",
-  describe_table: "Described a table",
+const CALLED: Record<string, MessageKey> = {
+  list_connections: "mcp.called.list_connections",
+  list_schemas: "mcp.called.list_schemas",
+  list_tables: "mcp.called.list_tables",
+  describe_table: "mcp.called.describe_table",
 };
 
 /** A row's second line when the call ran no SQL: why it failed, or what it did. */
 export function callSummary(entry: Pick<AuditEntry, "tool" | "error">): string {
-  return entry.error ?? CALLED[entry.tool] ?? `Called ${entry.tool}`;
+  return entry.error ?? (CALLED[entry.tool] ? t(CALLED[entry.tool]) : t("mcp.called.other", { tool: entry.tool }));
 }
 
 /** What each tool's count counts. */
-const COUNTED: Record<string, [one: string, many: string]> = {
-  list_connections: ["connection", "connections"],
-  list_schemas: ["schema", "schemas"],
-  list_tables: ["table", "tables"],
-  describe_table: ["column", "columns"],
+const COUNTED: Record<string, [one: MessageKey, many: MessageKey]> = {
+  list_connections: ["mcp.count.connection", "mcp.count.connections"],
+  list_schemas: ["mcp.count.schema", "mcp.count.schemas"],
+  list_tables: ["mcp.count.table", "mcp.count.tables"],
+  describe_table: ["mcp.count.column", "mcp.count.columns"],
 };
 
 /** `12 rows`, `1 table`, `200+ rows` when the result was cut short; `null` without a count. */
 export function countLabel(entry: Pick<AuditEntry, "tool" | "rowCount" | "truncated">): string | null {
   if (entry.rowCount === null) return null;
-  const [one, many] = COUNTED[entry.tool] ?? ["row", "rows"];
+  const [one, many] = COUNTED[entry.tool] ?? ["mcp.count.row", "mcp.count.rows"];
   const n = entry.rowCount;
-  return `${n.toLocaleString("en-US")}${entry.truncated ? "+" : ""} ${n === 1 && !entry.truncated ? one : many}`;
+  return `${formatNumber(n)}${entry.truncated ? "+" : ""} ${t(n === 1 && !entry.truncated ? one : many)}`;
 }

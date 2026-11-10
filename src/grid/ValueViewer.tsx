@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { rowGetter, type ResultMeta } from "../db/consoles";
+import { useT } from "../i18n";
 import { Button } from "../ui/primitives";
 import { editCell } from "./actions";
 import { useGrids, type EditorTarget } from "./dataEditor";
@@ -20,6 +21,7 @@ export function ValueViewer({
   result: ResultMeta;
   target: EditorTarget | undefined;
 }) {
+  const t = useT();
   const cell = useGrids((s) => s.selections[result.id]?.current?.cell);
   const edits = useGrids((s) => s.edits[result.id]) ?? NO_EDITS;
   const [col, row] = cell ?? [-1, -1];
@@ -36,7 +38,7 @@ export function ValueViewer({
   useEffect(() => setDraft(shown), [shown]);
 
   if (!column || value === undefined) {
-    return <Placeholder>Select a cell to see its full value.</Placeholder>;
+    return <Placeholder>{t("viewer.select")}</Placeholder>;
   }
 
   return (
@@ -52,20 +54,20 @@ export function ValueViewer({
             onChange={(e) => setDraft(e.target.value)}
             spellCheck={false}
             placeholder={value === null ? "<null>" : value === DEFAULT ? "<default>" : ""}
-            aria-label={`Value of ${column.name}`}
+            aria-label={t("viewer.valueOf", { name: column.name })}
             className="min-h-0 flex-1 resize-none bg-panel p-3 font-mono text-[12px] leading-[1.55] text-fg outline-none placeholder:text-subtle"
           />
           <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border px-3 py-2">
             <Button variant="ghost" onClick={() => editCell(consoleId, result.id, row, col, null)}>
-              Set NULL
+              {t("command.grid.setNull")}
             </Button>
             <Button variant="primary" disabled={draft === shown} onClick={() => editCell(consoleId, result.id, row, col, draft)}>
-              Apply
+              {t("viewer.apply")}
             </Button>
           </div>
         </>
       ) : value === null || value === DEFAULT ? (
-        <Placeholder>{value === null ? "NULL" : "Default value"}</Placeholder>
+        <Placeholder>{value === null ? "NULL" : t("viewer.default")}</Placeholder>
       ) : (
         <pre className="selectable min-h-0 flex-1 overflow-auto p-3 font-mono text-[12px] leading-[1.55] whitespace-pre-wrap text-fg">
           {shown}

@@ -5,6 +5,7 @@ import { create } from "zustand";
 import { api, errorMessage, type HistoryEntry } from "../db/api";
 import { useConsoles } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
+import { t, useLanguage, useT } from "../i18n";
 import { editorFor } from "../editor/registry";
 import {
   paletteContentClass,
@@ -31,6 +32,7 @@ const LIMIT = 500;
  * source, newest first. Picking one inserts it at the caret.
  */
 export function HistoryPalette() {
+  const t = useT();
   const { consoleId, hide } = useHistoryPalette();
   const dataSourceId = useConsoles((s) => (consoleId ? s.consoles[consoleId]?.dataSourceId : undefined));
   const sourceName = useDataSources((s) => s.sources.find((x) => x.id === dataSourceId)?.name);
@@ -58,7 +60,7 @@ export function HistoryPalette() {
     <Cmdk.Dialog
       open={consoleId !== undefined}
       onOpenChange={(open) => !open && hide()}
-      label="Query History"
+      label={t("command.console.history")}
       loop
       // Substring match: fuzzy scoring ranks SQL poorly.
       filter={(value, search) => (value.toLowerCase().includes(search.toLowerCase()) ? 1 : 0)}
@@ -67,17 +69,17 @@ export function HistoryPalette() {
     >
       <div className="flex items-center gap-2 border-b border-border px-3">
         <History className="size-4 text-subtle" />
-        <Cmdk.Input autoFocus placeholder={`Search history of ${sourceName ?? "this data source"}…`} className={paletteInputClass} />
+        <Cmdk.Input autoFocus placeholder={t("history.search", { name: sourceName ?? t("history.thisSource") })} className={paletteInputClass} />
         <Kbd>esc</Kbd>
       </div>
       <Cmdk.List className={paletteListClass}>
         {error ? (
           <div className="selectable px-3 py-6 text-center text-danger">{error}</div>
         ) : entries === null ? (
-          <Cmdk.Loading className="px-3 py-6 text-center text-muted">Loading…</Cmdk.Loading>
+          <Cmdk.Loading className="px-3 py-6 text-center text-muted">{t("tree.loading")}</Cmdk.Loading>
         ) : (
           <Cmdk.Empty className="px-3 py-6 text-center text-muted">
-            {entries.length === 0 ? "Nothing run against this data source yet." : "Nothing found"}
+            {entries.length === 0 ? t("history.empty") : t("search.nothingFound")}
           </Cmdk.Empty>
         )}
         {entries?.map((entry) => (
@@ -116,9 +118,8 @@ function dedupe(entries: HistoryEntry[]): HistoryEntry[] {
   });
 }
 
-const relative = new Intl.RelativeTimeFormat("en", { numeric: "auto", style: "short" });
-
 function relativeTime(iso: string): string {
+  const relative = new Intl.RelativeTimeFormat(useLanguage.getState().locale, { numeric: "auto", style: "short" });
   const seconds = Math.round((Date.parse(iso) - Date.now()) / 1000);
   const units: [Intl.RelativeTimeFormatUnit, number][] = [
     ["day", 86_400],
@@ -128,5 +129,5 @@ function relativeTime(iso: string): string {
   for (const [unit, size] of units) {
     if (Math.abs(seconds) >= size) return relative.format(Math.round(seconds / size), unit);
   }
-  return "just now";
+  return t("history.justNow");
 }

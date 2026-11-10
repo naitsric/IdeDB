@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import { keymapHeld } from "../commands/keymapHold";
 import { executeCommand, useCommands } from "../commands/registry";
+import { useLocale } from "../i18n";
 import { buildMenuModel } from "./menuModel";
 
 /** Registration bursts (app start, a panel mounting) rebuild the menu once. */
@@ -24,6 +25,7 @@ export function noteKeyboardRun(commandId: string) {
 /** Keeps the native menu bar in sync with the command registry and runs what it picks. */
 export function useNativeMenu() {
   const commands = useCommands((s) => s.commands);
+  const locale = useLocale();
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -32,7 +34,7 @@ export function useNativeMenu() {
       );
     }, REBUILD_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [commands]);
+  }, [commands, locale]);
 
   useEffect(() => {
     const unlisten = listen<string>("menu-command", ({ payload: commandId }) => runMenuCommand(commandId));

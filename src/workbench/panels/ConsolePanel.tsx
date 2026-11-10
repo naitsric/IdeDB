@@ -2,6 +2,7 @@ import type { IDockviewPanelProps } from "dockview-react";
 import { Play, Square } from "lucide-react";
 import { useEffect, useMemo } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
+import { useT } from "../../i18n";
 import { executeCommand } from "../../commands/registry";
 import { activeResult, isRunning, rowGetter, useConsoles } from "../../db/consoles";
 import { useDataSources } from "../../db/dataSources";
@@ -20,6 +21,7 @@ const noRows = () => undefined;
 
 /** A query console bound to one data source: SQL editor on top, result tabs below. */
 export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: string }>) {
+  const t = useT();
   const { consoleId } = params;
   const entry = useConsoles((s) => s.consoles[consoleId]);
   const setSql = useConsoles((s) => s.setSql);
@@ -36,7 +38,7 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
   const lintContext = useLintContext(consoleId);
   useEffect(() => editorFor(consoleId)?.refreshDiagnostics(), [consoleId, lintContext]);
 
-  const title = entry?.table?.name ?? source?.name ?? "console";
+  const title = entry?.table?.name ?? source?.name ?? t("tx.consoleFallback");
   useEffect(() => api.setTitle(title), [api, title]);
 
   // Focus the editor whenever this tab becomes active.
@@ -50,7 +52,7 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
   if (!entry || !source) {
     return (
       <div className="flex h-full items-center justify-center bg-panel text-[12px] text-subtle">
-        This console's data source no longer exists.
+        {t("console.sourceGone")}
       </div>
     );
   }
@@ -64,7 +66,7 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
       {source.color && <div className="h-0.5 shrink-0" style={{ background: source.color }} />}
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border px-2">
         <IconButton
-          label="Execute"
+          label={t("console.execute")}
           shortcut="$mod+Enter"
           disabled={running || entry.connecting}
           onClick={() => executeCommand("console.execute")}
@@ -73,7 +75,7 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
           <Play className="size-4 fill-current" />
         </IconButton>
         <IconButton
-          label="Cancel"
+          label={t("common.cancel")}
           shortcut="$mod+F2"
           disabled={!running}
           onClick={() => executeCommand("console.cancel")}
@@ -94,8 +96,8 @@ export function ConsolePanel({ params, api }: IDockviewPanelProps<{ consoleId: s
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2 text-[11px] text-subtle">
-          Run <Kbd binding="$mod+Enter" />
-          History <Kbd binding="$mod+Alt+KeyE" />
+          {t("console.run")} <Kbd binding="$mod+Enter" />
+          {t("console.history")} <Kbd binding="$mod+Alt+KeyE" />
         </div>
       </div>
       <Group orientation="vertical" className="min-h-0 flex-1">

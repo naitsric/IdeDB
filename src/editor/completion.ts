@@ -5,6 +5,7 @@ import type { EditorState } from "@codemirror/state";
 import type { ColumnInfo, Engine, SchemaInfo, TableInfo } from "../db/api";
 import type { SchemaLoad } from "../db/dataSources";
 import { quoteIdent } from "../db/sql";
+import { t } from "../i18n";
 
 /**
  * Schema-aware SQL completion, DataGrip style:
@@ -116,7 +117,7 @@ function topLevel(snapshot: CatalogSnapshot, at: Analysis): Completion[] {
       options.push({
         label: schema.name,
         type: "schema",
-        detail: "schema",
+        detail: t("completion.schema"),
         boost: 1,
         // Inserting a schema goes straight on to its tables, as in DataGrip.
         apply: (view, _completion, from, to) => {
@@ -157,7 +158,7 @@ function topLevel(snapshot: CatalogSnapshot, at: Analysis): Completion[] {
     if (ref.alias) options.push({ label: ref.alias, type: "alias", detail: ref.path.join("."), boost: 1 });
   }
   for (const schema of visibleSchemas(snapshot)) {
-    options.push({ label: schema.name, type: "schema", detail: "schema", apply: quoteIdentApply(engine, schema.name) });
+    options.push({ label: schema.name, type: "schema", detail: t("completion.schema"), apply: quoteIdentApply(engine, schema.name) });
   }
   const defaultTables = defaultSchema ? loadedModel(snapshot, defaultSchema) : null;
   for (const table of defaultTables ?? []) options.push(tableCompletion(engine, table));
@@ -267,7 +268,7 @@ function joinOptions(snapshot: CatalogSnapshot, at: Analysis): Completion[] {
       const label = `${target.table.name} ${alias} on ${on}`;
       if (seen.has(label)) continue;
       seen.add(label);
-      options.push({ label, apply: `${name} ${alias} on ${on}`, type: "join", detail: "foreign key", boost: 5 });
+      options.push({ label, apply: `${name} ${alias} on ${on}`, type: "join", detail: t("completion.foreignKey"), boost: 5 });
     }
   }
   return options;
@@ -287,7 +288,7 @@ function onConditionOptions(snapshot: CatalogSnapshot, at: Analysis): Completion
       const label = outgoing
         ? condition(engine, last.ref, link.from.columns, other.ref, link.to.columns)
         : condition(engine, last.ref, link.to.columns, other.ref, link.from.columns);
-      options.push({ label, type: "join", detail: "foreign key", boost: 5 });
+      options.push({ label, type: "join", detail: t("completion.foreignKey"), boost: 5 });
     }
   }
   return options;
@@ -358,7 +359,7 @@ function columnCompletion(engine: Engine, column: ColumnInfo): Completion {
 }
 
 function kindLabel(table: TableInfo): string {
-  return table.kind === "view" || table.kind === "materializedView" ? "view" : "table";
+  return table.kind === "view" || table.kind === "materializedView" ? t("completion.view") : t("completion.table");
 }
 
 /** Only set `apply` when the name needs quoting, so plain names insert as typed-matched. */

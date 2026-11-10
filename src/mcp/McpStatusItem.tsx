@@ -1,4 +1,5 @@
 import { ShieldAlert } from "lucide-react";
+import { useT } from "../i18n";
 import { cx, StatusDot } from "../ui/primitives";
 import { useNow } from "../ui/useNow";
 import { toggleMcp } from "../workbench/Workbench";
@@ -13,6 +14,7 @@ import { showApprovals, useMcp } from "./store";
  * approval dialog back.
  */
 export function McpStatusItem() {
+  const t = useT();
   const status = useMcp((s) => s.status);
   const enabled = useMcp((s) => s.settings?.enabled ?? false);
   const clients = useMcp((s) => s.clients);
@@ -26,7 +28,7 @@ export function McpStatusItem() {
         <button
           type="button"
           onClick={showApprovals}
-          title="Writes waiting for your approval"
+          title={t("mcp.approvals.waiting")}
           className="flex items-center gap-1 rounded-full bg-warning/15 px-1.5 font-medium text-warning hover:bg-warning/25"
         >
           <ShieldAlert className="size-3" />

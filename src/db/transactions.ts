@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { message } from "@tauri-apps/plugin-dialog";
 import { create } from "zustand";
+import { t, type MessageKey } from "../i18n";
 import { api, errorMessage, type Engine, type SessionId } from "./api";
 import { activeResult, isRunning, setExecutionHooks, useConsoles, type ConsoleState } from "./consoles";
 import { useDataSources } from "./dataSources";
@@ -76,11 +77,11 @@ export function nextTransactionState(
     return { open: { since: base.since, statements: base.statements + (control ? 0 : 1), failed } };
   }
   if (!o.wasOpen) return {};
-  if (o.sessionLost) return { notice: "The session was lost and the open transaction with it: nothing in it was committed." };
-  if (o.error !== undefined) return { notice: `The open transaction ended: ${o.error.replace(/\s+/g, " ").trim()}` };
+  if (o.sessionLost) return { notice: t("tx.notice.sessionLost") };
+  if (o.error !== undefined) return { notice: t("tx.notice.ended", { error: o.error.replace(/\s+/g, " ").trim() }) };
   if (control) return {};
   return {
-    notice: "This statement ended the open transaction: the database committed it implicitly (MySQL does for DDL, for example).",
+    notice: t("tx.notice.implicitCommit"),
   };
 }
 
@@ -167,7 +168,7 @@ async function runControl(
   sql: string,
 ): Promise<{ inTransaction: boolean; error?: string }> {
   useConsoles.getState().releaseOpenResults(consoleId);
-  let outcome: { inTransaction: boolean; error?: string } = { inTransaction: false, error: "No answer from the database." };
+  let outcome: { inTransaction: boolean; error?: string } = { inTransaction: false, error: t("tx.noAnswer") };
   try {
     // Transaction control returns no rows: nothing to page.
     await api.execute(sessionId, sql, null, (event) => {
@@ -197,8 +198,8 @@ export async function beginIfManual(
   if (!engine) return undefined;
   const outcome = await runControl(consoleId, sessionId, beginSql(engine));
   useConsoles.getState().setInTransaction(consoleId, outcome.inTransaction);
-  if (outcome.error !== undefined) return `Could not open a transaction (manual mode): ${outcome.error}`;
-  if (!outcome.inTransaction) return "Could not open a transaction (manual mode): the session still commits each statement.";
+  if (outcome.error !== undefined) return t("tx.beginFailed", { error: outcome.error });
+  if (!outcome.inTransaction) return t("tx.beginNotOpen");
   setNotice(consoleId, undefined);
   return undefined;
 }
@@ -226,13 +227,13 @@ export async function endTransaction(consoleId: string, kind: "commit" | "rollba
     const outcome = await runControl(consoleId, entry.sessionId, kind);
     useConsoles.getState().setInTransaction(consoleId, outcome.inTransaction);
     if (outcome.error !== undefined) {
-      setNotice(consoleId, `${kind === "commit" ? "Commit" : "Rollback"} failed: ${outcome.error}`);
+      setNotice(consoleId, t(kind === "commit" ? "tx.commitFailed" : "tx.rollbackFailed", { error: outcome.error }));
       return false;
     }
     setNotice(
       consoleId,
       kind === "commit" && failedBefore && engineOf(entry) === "postgres"
-        ? "PostgreSQL rolled the transaction back instead of committing it: a statement in it had failed."
+        ? t("tx.notice.pgRolledBack")
         : undefined,
     );
     // Rows the data editor shows may include changes that were just undone.
@@ -253,8 +254,17 @@ function reloadTableData(consoleId: string) {
 /* Guard rails. */
 
 function consoleTitle(entry: ConsoleState): string {
-  return entry.table?.name ?? useDataSources.getState().sources.find((s) => s.id === entry.dataSourceId)?.name ?? "console";
+  return entry.table?.name ?? useDataSources.getState().sources.find((s) => s.id === entry.dataSourceId)?.name ?? t("tx.consoleFallback");
 }
+
+/** What the guard says the user is about to do; other text is shown as given. */
+const ACTION_TEXT: Record<string, MessageKey> = {
+  disconnect: "tx.action.disconnect",
+  "delete the data source": "tx.action.deleteDataSource",
+  "close the console": "tx.action.closeConsole",
+  "quit IdeDB": "tx.action.quit",
+  "close IdeDB": "tx.action.closeApp",
+};
 
 /**
  * Before something that would end the consoles' sessions (closing a tab,
@@ -262,6 +272,7 @@ function consoleTitle(entry: ConsoleState): string {
  * or roll back their open transactions. Resolves to whether to go on.
  */
 export async function confirmEndTransactions(consoleIds: readonly string[], action: string): Promise<boolean> {
+  const actionText = ACTION_TEXT[action] ? t(ACTION_TEXT[action]) : action;
   const { consoles } = useConsoles.getState();
   const open = consoleIds.filter((id) => consoles[id]?.inTransaction);
   if (open.length === 0) return true;
@@ -269,16 +280,23 @@ export async function confirmEndTransactions(consoleIds: readonly string[], acti
   const statements = (id: string) => useTransactions.getState().open[id]?.statements ?? 0;
   const text =
     open.length === 1
-      ? `The console "${consoleTitle(consoles[open[0]])}" has an open transaction (${statements(open[0])} ${statements(open[0]) === 1 ? "statement" : "statements"}).`
-      : `${open.length} consoles have open transactions: ${open.map((id) => `"${consoleTitle(consoles[id])}"`).join(", ")}.`;
-  const choice = await message(`${text}\n\nCommit or roll back before you ${action}?`, {
-    title: open.length === 1 ? "Open transaction" : "Open transactions",
+      ? t(statements(open[0]) === 1 ? "tx.confirm.one.statement" : "tx.confirm.one.statements", {
+          name: consoleTitle(consoles[open[0]]),
+          count: statements(open[0]),
+        })
+      : t("tx.confirm.many", {
+          count: open.length,
+          names: open.map((id) => `"${consoleTitle(consoles[id])}"`).join(", "),
+        });
+  const [commitLabel, rollbackLabel] = [t("command.transaction.commit"), t("command.transaction.rollback")];
+  const choice = await message(t("tx.confirm.question", { text, action: actionText }), {
+    title: t(open.length === 1 ? "tx.confirm.title.one" : "tx.confirm.title.many"),
     kind: "warning",
-    buttons: { yes: "Commit", no: "Rollback", cancel: "Cancel" },
+    buttons: { yes: commitLabel, no: rollbackLabel, cancel: t("common.cancel") },
   });
-  if (choice !== "Commit" && choice !== "Rollback") return false;
+  if (choice !== commitLabel && choice !== rollbackLabel) return false;
 
-  const kind = choice === "Commit" ? "commit" : "rollback";
+  const kind = choice === commitLabel ? "commit" : "rollback";
   const ended = await Promise.all(open.map((id) => endTransaction(id, kind)));
   return ended.every(Boolean);
 }

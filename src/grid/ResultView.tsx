@@ -6,6 +6,7 @@ import type { Value } from "../db/api";
 import { useConsoles, type ResultMeta } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { rowsLabel, shouldFetchMore, useFetchSettings } from "../db/fetching";
+import { formatNumber, useT } from "../i18n";
 import { ContextMenuRoot, ContextMenuTrigger } from "../ui/ContextMenu";
 import { formatDuration } from "../ui/format";
 import { editCell, visibleRowCount } from "./actions";
@@ -17,7 +18,6 @@ import { ResultGrid } from "./ResultGrid";
 import { TableBar } from "./TableBar";
 import { ValueViewer } from "./ValueViewer";
 
-const count = new Intl.NumberFormat("en-US");
 const MAX_AGGREGATED_CELLS = 1_000_000;
 
 /**
@@ -34,6 +34,7 @@ export const ResultView = memo(function ResultView({
   result?: ResultMeta;
   getRow: (index: number) => Value[] | undefined;
 }) {
+  const t = useT();
   const entry = useConsoles((s) => s.consoles[consoleId]);
   const schema = result?.table?.schema;
   const load = useDataSources((s) => (entry && schema ? s.explorers[entry.dataSourceId]?.models[schema] : undefined));
@@ -41,7 +42,7 @@ export const ResultView = memo(function ResultView({
   const submitting = useGrids((s) => (result ? !!s.submitting[result.id] : false));
   // `load` makes the target follow the introspected structure as it arrives;
   // `submitting` makes the grid read-only while a submit runs.
-  const target = useMemo(() => editorTarget(entry, result), [entry, result, load, submitting]);
+  const target = useMemo(() => editorTarget(entry, result), [entry, result, load, submitting, t]);
 
   // Editing and foreign key navigation need the table's structure.
   useEffect(() => {
@@ -54,7 +55,7 @@ export const ResultView = memo(function ResultView({
       <ResultStatus consoleId={consoleId} result={result} getRow={getRow} />
       <div className="relative min-h-0 flex-1">
         {!result ? (
-          <Empty>Run a statement to see results here.</Empty>
+          <Empty>{t("result.empty")}</Empty>
         ) : result.status === "error" && result.columns.length === 0 ? (
           <pre className="selectable m-3 rounded-md bg-danger/10 p-3 font-mono text-[12px] whitespace-pre-wrap text-danger">
             {result.error}
@@ -62,8 +63,10 @@ export const ResultView = memo(function ResultView({
         ) : result.columns.length === 0 && result.status !== "running" ? (
           <Empty>
             {result.affectedRows !== undefined
-              ? `${count.format(result.affectedRows)} ${result.affectedRows === 1 ? "row" : "rows"} affected`
-              : "Statement executed"}
+              ? t(result.affectedRows === 1 ? "result.affected.one" : "result.affected.many", {
+                  count: formatNumber(result.affectedRows),
+                })
+              : t("result.executed")}
           </Empty>
         ) : (
           <ResultBody consoleId={consoleId} result={result} getRow={getRow} target={target} />
@@ -191,6 +194,7 @@ function ResultStatus({
   result?: ResultMeta;
   getRow: (index: number) => Value[] | undefined;
 }) {
+  const t = useT();
   const resultId = result?.id ?? -1;
   const selection = useGrids((s) => s.selections[resultId]);
   const edits = useGrids((s) => s.edits[resultId]) ?? NO_EDITS;
@@ -228,10 +232,10 @@ function ResultStatus({
   const pending = changeCount(edits);
   const parts = [
     result.columns.length > 0 && rowsLabel(result.rowCount, result.more),
-    result.firstPageMs !== undefined && `first page ${result.firstPageMs} ms`,
+    result.firstPageMs !== undefined && t("result.firstPage", { ms: result.firstPageMs }),
     result.elapsedMs !== undefined && formatDuration(result.elapsedMs),
-    result.fetchMs !== undefined && `last fetch ${formatDuration(result.fetchMs)}`,
-    result.status === "cancelled" && "cancelled",
+    result.fetchMs !== undefined && t("result.lastFetch", { time: formatDuration(result.fetchMs) }),
+    result.status === "cancelled" && t("result.cancelled"),
   ].filter(Boolean);
 
   return (
@@ -241,7 +245,7 @@ function ResultStatus({
       <MoreRowsActions consoleId={consoleId} result={result} />
       {pending > 0 && (
         <span className="shrink-0 rounded bg-accent-soft px-1.5 py-px text-[11px] text-accent">
-          {pending} pending {pending === 1 ? "change" : "changes"}
+          {t(pending === 1 ? "result.pending.one" : "result.pending.many", { count: pending })}
         </span>
       )}
       {selected && <span className="shrink-0 text-subtle tabular-nums">{selected}</span>}
@@ -250,7 +254,7 @@ function ResultStatus({
       )}
       {failure && (
         <span className="selectable truncate text-danger" title={failure.message}>
-          {failure.row >= 0 ? `Row ${failure.row + 1}: ` : ""}
+          {failure.row >= 0 ? t("result.row", { row: failure.row + 1 }) : ""}
           {failure.message}
         </span>
       )}
@@ -265,6 +269,7 @@ function ResultStatus({
  * of them, release them, stop a fetch, or re-run once they are gone.
  */
 function MoreRowsActions({ consoleId, result }: { consoleId: string; result: ResultMeta }) {
+  const t = useT();
   const pageSize = useFetchSettings((s) => s.pageSize);
   const { fetchMore, closeCursor, cancel, runStatement } = useConsoles.getState();
 
@@ -272,20 +277,20 @@ function MoreRowsActions({ consoleId, result }: { consoleId: string; result: Res
     return (
       <span className="flex shrink-0 items-center gap-1.5 text-accent">
         <LoaderCircle className="size-3.5 animate-spin" />
-        {result.fetching === "all" ? "Fetching all rows…" : "Fetching…"}
-        <LinkButton onClick={() => void cancel(consoleId)}>Cancel</LinkButton>
+        {result.fetching === "all" ? t("result.fetchingAll") : t("result.fetching")}
+        <LinkButton onClick={() => void cancel(consoleId)}>{t("common.cancel")}</LinkButton>
       </span>
     );
   }
   if (result.more === "open") {
     return (
       <span className="flex shrink-0 items-center gap-2">
-        <LinkButton onClick={() => void fetchMore(consoleId, result.id)}>Fetch next {count.format(pageSize)}</LinkButton>
-        <LinkButton onClick={() => void fetchMore(consoleId, result.id, true)}>Fetch all</LinkButton>
+        <LinkButton onClick={() => void fetchMore(consoleId, result.id)}>{t("result.fetchNext", { count: formatNumber(pageSize) })}</LinkButton>
+        <LinkButton onClick={() => void fetchMore(consoleId, result.id, true)}>{t("result.fetchAll")}</LinkButton>
         <button
           type="button"
-          title="Close result set: release the rows not loaded"
-          aria-label="Close result set"
+          title={t("result.closeSet.hint")}
+          aria-label={t("result.closeSet")}
           onClick={() => void closeCursor(consoleId)}
           className="rounded p-0.5 text-subtle hover:bg-hover hover:text-fg"
         >
@@ -298,9 +303,9 @@ function MoreRowsActions({ consoleId, result }: { consoleId: string; result: Res
     return (
       <span className="flex min-w-0 items-center gap-2 text-subtle">
         <span className="truncate" title={result.fetchError}>
-          {result.fetchError ?? "More rows were not loaded"}
+          {result.fetchError ?? t("result.notLoaded")}
         </span>
-        <LinkButton onClick={() => void runStatement(consoleId, result.sql, { table: result.table })}>Re-run</LinkButton>
+        <LinkButton onClick={() => void runStatement(consoleId, result.sql, { table: result.table })}>{t("result.rerun")}</LinkButton>
       </span>
     );
   }

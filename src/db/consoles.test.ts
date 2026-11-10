@@ -49,7 +49,8 @@ vi.mock("./dataSources", () => ({
 }));
 
 const { api } = await import("./api");
-const { activeResult, rowGetter, setPendingChangesProbe, useConsoles } = await import("./consoles");
+const { activeResult, resultTitle, rowGetter, setPendingChangesProbe, useConsoles } = await import("./consoles");
+const { useLanguage } = await import("../i18n");
 
 const rows = (sql: string, values: number[], hasMore = false) =>
   replies.set(sql, [
@@ -60,7 +61,7 @@ const rows = (sql: string, values: number[], hasMore = false) =>
 
 let consoleId = "";
 const entry = () => useConsoles.getState().consoles[consoleId];
-const titles = () => entry().results.map((r) => `${r.title}${r.pinned ? "*" : ""}`);
+const titles = () => entry().results.map((r) => `${resultTitle(r)}${r.pinned ? "*" : ""}`);
 
 beforeEach(() => {
   replies.clear();
@@ -157,7 +158,26 @@ describe("result tabs", () => {
     togglePin(consoleId, entry().activeResultId!);
     await runStatement(consoleId, "select 1");
     expect(titles()).toEqual(["Result 1*", "Result 2"]);
-    expect(activeResult(entry())?.title).toBe("Result 2");
+    expect(resultTitle(activeResult(entry())!)).toBe("Result 2");
+  });
+
+  it("keeps the number, not a translated title, so tabs follow the language", async () => {
+    rows("select 1", [1]);
+    const { runStatement } = useConsoles.getState();
+    useLanguage.getState().setPreference("en");
+    try {
+      await runStatement(consoleId, "select 1");
+      expect(titles()).toEqual(["Result 1"]);
+      expect(entry().results[0].title).toBeUndefined();
+      useLanguage.getState().setPreference("es");
+      expect(titles()).toEqual(["Resultado 1"]);
+      await runStatement(consoleId, "select 1");
+      expect(titles()).toEqual(["Resultado 1"]);
+      useLanguage.getState().setPreference("en");
+      expect(titles()).toEqual(["Result 1"]);
+    } finally {
+      useLanguage.getState().setPreference("system");
+    }
   });
 
   it("opens a new tab on request and streams rows into it", async () => {
@@ -205,7 +225,7 @@ describe("result tabs", () => {
 
     useConsoles.getState().selectResult(consoleId, first!.id);
     await closeResult(consoleId, first!.id);
-    expect(activeResult(entry())?.title).toBe("Result 3");
+    expect(resultTitle(activeResult(entry())!)).toBe("Result 3");
   });
 
   it("numbers new tabs after the last one opened, not the count left", async () => {

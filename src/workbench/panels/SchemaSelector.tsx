@@ -1,5 +1,6 @@
 import { FolderTree } from "lucide-react";
 import { effectiveSchema, useConsoles } from "../../db/consoles";
+import { useT } from "../../i18n";
 import { useDataSources } from "../../db/dataSources";
 
 /**
@@ -8,6 +9,7 @@ import { useDataSources } from "../../db/dataSources";
  * resolves names across attached databases, and until schemas are known.
  */
 export function SchemaSelector({ consoleId }: { consoleId: string }) {
+  const t = useT();
   const entry = useConsoles((s) => s.consoles[consoleId]);
   const setSchema = useConsoles((s) => s.setSchema);
   const source = useDataSources((s) => s.sources.find((x) => x.id === entry?.dataSourceId));
@@ -23,15 +25,15 @@ export function SchemaSelector({ consoleId }: { consoleId: string }) {
     .map((s) => s.name);
 
   return (
-    <label className="ml-2 flex shrink-0 items-center gap-1 text-[12px] text-muted" title="Current schema">
+    <label className="ml-2 flex shrink-0 items-center gap-1 text-[12px] text-muted" title={t("schema.current")}>
       <FolderTree className="size-3.5 text-subtle" />
       <select
-        aria-label="Current schema"
+        aria-label={t("schema.current")}
         value={current ?? ""}
         onChange={(e) => void setSchema(consoleId, e.target.value === serverDefault ? undefined : e.target.value)}
         className="h-6 max-w-40 rounded-md border border-transparent bg-transparent px-1 text-[12px] text-fg outline-none hover:border-border focus:border-accent"
       >
-        {current === null && <option value="">(none)</option>}
+        {current === null && <option value="">{t("schema.none")}</option>}
         {options.map((name) => (
           <option key={name} value={name}>
             {name}

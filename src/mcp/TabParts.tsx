@@ -1,5 +1,6 @@
 import { CircleAlert, Power, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { useT } from "../i18n";
 import { Button, cx } from "../ui/primitives";
 import { serverIsOff } from "./status";
 import { loadMcp, setMcpTab, toggleServer, useMcp } from "./store";
@@ -8,16 +9,17 @@ import { loadMcp, setMcpTab, toggleServer, useMcp } from "./store";
 
 /** Says the initial load failed, with a retry. */
 export function LoadErrorBanner() {
+  const t = useT();
   const loadError = useMcp((s) => s.loadError);
   if (!loadError) return null;
   return (
     <div className="flex shrink-0 items-center gap-2 border-b border-border bg-danger/10 px-3 py-1.5 text-[12px] text-danger">
       <CircleAlert className="size-3.5 shrink-0" />
       <span className="selectable min-w-0 flex-1 truncate" title={loadError}>
-        Couldn't load the MCP server's state: {loadError}
+        {t("mcp.banner.loadFailed", { error: loadError })}
       </span>
       <Button className="h-6" onClick={() => void loadMcp()}>
-        Retry
+        {t("mcp.banner.retry")}
       </Button>
     </div>
   );
@@ -25,6 +27,7 @@ export function LoadErrorBanner() {
 
 /** Says when clients can't connect: the server is off or failed to start. */
 export function ServerBanner() {
+  const t = useT();
   const status = useMcp((s) => s.status);
   const enabled = useMcp((s) => s.settings?.enabled ?? false);
   const loaded = useMcp((s) => s.loaded);
@@ -40,16 +43,16 @@ export function ServerBanner() {
       {failed ? <CircleAlert className="size-3.5 shrink-0" /> : <Power className="size-3.5 shrink-0" />}
       <span className="selectable min-w-0 flex-1 truncate" title={status.error ?? undefined}>
         {failed
-          ? `The MCP server couldn't start: ${status.error}`
-          : "The MCP server is off, so no client can connect."}
+          ? t("mcp.status.errorTitle", { error: String(status.error) })
+          : t("mcp.banner.off")}
       </span>
       {failed ? (
         <Button className="h-6" onClick={() => setMcpTab("server")}>
-          Server Settings
+          {t("mcp.banner.serverSettings")}
         </Button>
       ) : (
         <Button className="h-6" onClick={() => void toggleServer()}>
-          Turn On
+          {t("mcp.banner.turnOn")}
         </Button>
       )}
     </div>

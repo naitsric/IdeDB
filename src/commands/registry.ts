@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { tDynamic, type MessageKey } from "../i18n";
 
 /**
  * Where keyboard focus is, for keys that mean different things in different
@@ -15,8 +16,14 @@ export type FocusContext = "grid" | "editor";
 export interface Command {
   /** Stable id, `<area>.<action>`, e.g. `console.execute`. Keymap overrides key on it. */
   id: string;
-  title: string;
-  /** Group shown in Search Everywhere, e.g. "Console". */
+  /** Key of the translated name shown to the user; see {@link commandTitle}. */
+  titleKey?: MessageKey;
+  /** Plain name for a command with no translation (tests, ad-hoc commands). */
+  title?: string;
+  /**
+   * Group a command belongs to, e.g. "Console". An internal key that places
+   * it in the native menus; what is shown is {@link categoryLabel}.
+   */
   category: string;
   /** tinykeys syntax, e.g. `$mod+Enter`, `$mod+Shift+KeyA`. */
   keybinding?: string;
@@ -50,6 +57,19 @@ export function registerCommands(commands: Command[]): () => void {
       for (const c of commands) if (next[c.id] === c) delete next[c.id];
       return { commands: next };
     });
+}
+
+/** The command's name in the active language. */
+export function commandTitle(command: Command): string {
+  if (command.titleKey) return tDynamic(command.titleKey);
+  return command.title ?? command.id;
+}
+
+/** A category's name in the active language; the key itself when it has no translation. */
+export function categoryLabel(category: string): string {
+  const key = `category.${category}`;
+  const label = tDynamic(key);
+  return label === key ? category : label;
 }
 
 export function isEnabled(command: Command): boolean {

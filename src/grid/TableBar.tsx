@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { runTableQuery } from "../actions";
 import { executeCommand } from "../commands/registry";
 import { useConsoles, type ResultMeta } from "../db/consoles";
+import { useT } from "../i18n";
 import { IconButton, cx } from "../ui/primitives";
 import { filterInputs } from "./actions";
 import { useGrids, type EditorTarget } from "./dataEditor";
@@ -21,6 +22,7 @@ export function TableBar({
   result: ResultMeta;
   target: EditorTarget | undefined;
 }) {
+  const t = useT();
   const table = useConsoles((s) => s.consoles[consoleId]?.table);
   const pending = useGrids((s) => changeCount(s.edits[result.id] ?? NO_EDITS));
   const submitting = useGrids((s) => !!s.submitting[result.id]);
@@ -40,7 +42,7 @@ export function TableBar({
     <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-2">
       <FilterInput
         label="WHERE"
-        placeholder="condition, e.g. status = 'paid'"
+        placeholder={t("tablebar.wherePlaceholder")}
         applied={table?.where ?? ""}
         onApply={(where) => apply({ where })}
         inputRef={(el) => (el ? filterInputs.set(consoleId, el) : filterInputs.delete(consoleId))}
@@ -48,27 +50,27 @@ export function TableBar({
       />
       <FilterInput
         label="ORDER BY"
-        placeholder="e.g. created_at desc"
+        placeholder={t("tablebar.orderByPlaceholder")}
         applied={table?.orderBy ?? ""}
         onApply={(orderBy) => apply({ orderBy })}
         className="flex-[2]"
       />
       <div className="flex shrink-0 items-center gap-0.5">
-        <IconButton label="Add Row" shortcut="$mod+KeyN" disabled={!editable} onClick={() => executeCommand("grid.addRow")}>
+        <IconButton label={t("command.grid.addRow")} shortcut="$mod+KeyN" disabled={!editable} onClick={() => executeCommand("grid.addRow")}>
           <Plus className="size-4" />
         </IconButton>
-        <IconButton label="Duplicate Row" shortcut="$mod+KeyD" disabled={!editable} onClick={() => executeCommand("grid.duplicateRows")}>
+        <IconButton label={t("tablebar.duplicateRow")} shortcut="$mod+KeyD" disabled={!editable} onClick={() => executeCommand("grid.duplicateRows")}>
           <Copy className="size-3.5" />
         </IconButton>
-        <IconButton label="Delete Rows" shortcut="$mod+Backspace" disabled={!editable} onClick={() => executeCommand("grid.deleteRows")}>
+        <IconButton label={t("command.grid.deleteRows")} shortcut="$mod+Backspace" disabled={!editable} onClick={() => executeCommand("grid.deleteRows")}>
           <Minus className="size-4" />
         </IconButton>
-        <IconButton label="Revert Selected" shortcut="$mod+Alt+KeyZ" disabled={pending === 0} onClick={() => executeCommand("grid.revertSelected")}>
+        <IconButton label={t("tablebar.revertSelected")} shortcut="$mod+Alt+KeyZ" disabled={pending === 0} onClick={() => executeCommand("grid.revertSelected")}>
           <Undo2 className="size-3.5" />
         </IconButton>
         <button
           type="button"
-          title="Submit changes  ⌘⏎"
+          title={`${t("tablebar.submitHint")}  ⌘⏎`}
           disabled={pending === 0 || submitting}
           onClick={() => executeCommand("grid.submit")}
           className={cx(
@@ -79,10 +81,10 @@ export function TableBar({
           )}
         >
           <Check className="size-3.5" />
-          Submit{pending > 0 && ` (${pending})`}
+          {t("tablebar.submit")}{pending > 0 && ` (${pending})`}
         </button>
         <IconButton
-          label="Value Viewer"
+          label={t("command.grid.valueViewer")}
           shortcut="$mod+Alt+KeyV"
           onClick={() => executeCommand("grid.valueViewer")}
           className={cx("ml-1", viewer && "bg-active text-fg")}

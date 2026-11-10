@@ -54,6 +54,7 @@ import {
   useMcp,
 } from "./store";
 import { EmptyState, LoadErrorBanner, ServerBanner, useServerOff } from "./TabParts";
+import { formatNumber, useT } from "../i18n";
 
 /** Every row is this tall, so which rows are on screen is arithmetic. */
 const ROW_HEIGHT = 44;
@@ -149,35 +150,32 @@ export function ActivityTab() {
 
 /** The empty tab before any client called anything: how to get there. */
 function NothingYet({ serverOff }: { serverOff: boolean }) {
+  const t = useT();
   const noClients = useMcp((s) => s.clients.length === 0);
   if (serverOff) {
     return (
-      <EmptyState icon={Power} title="The MCP server is off">
-        Turn it on, then connect a client from the Clients tab. Every call it makes through IdeDB shows up here as it
-        happens.
+      <EmptyState icon={Power} title={t("mcp.activity.off.title")}>
+        {t("mcp.activity.off.body")}
         <div className="mt-3 flex gap-2">
           <Button variant="primary" onClick={() => void toggleServer()}>
-            Turn On
+            {t("mcp.banner.turnOn")}
           </Button>
-          <Button onClick={() => setMcpTab("clients")}>Go to Clients</Button>
+          <Button onClick={() => setMcpTab("clients")}>{t("mcp.activity.goToClients")}</Button>
         </div>
       </EmptyState>
     );
   }
   return (
-    <EmptyState icon={Activity} title="No activity yet">
-      Every call an MCP client makes through IdeDB shows up here as it happens: the SQL, who sent it, on which data
-      source, and whether it ran.{" "}
-      {noClients
-        ? "Create a client, grant it access to a data source, and paste its configuration into the app, like Claude Code or Cursor."
-        : "Paste a client's configuration from the Clients tab into the app, then ask it about your data."}
+    <EmptyState icon={Activity} title={t("mcp.activity.none.title")}>
+      {t("mcp.activity.none.body")}{" "}
+      {noClients ? t("mcp.activity.none.noClients") : t("mcp.activity.none.hasClients")}
       <div className="mt-3 flex gap-2">
         {noClients && (
           <Button variant="primary" onClick={openNewClient}>
-            <Plus className="size-3.5" /> New Client
+            <Plus className="size-3.5" /> {t("mcp.activity.newClient")}
           </Button>
         )}
-        <Button onClick={() => setMcpTab("clients")}>Go to Clients</Button>
+        <Button onClick={() => setMcpTab("clients")}>{t("mcp.activity.goToClients")}</Button>
       </div>
     </EmptyState>
   );
@@ -187,6 +185,7 @@ function NothingYet({ serverOff }: { serverOff: boolean }) {
 
 /** Search over the SQL, the three filters, and the count. */
 function Toolbar({ inputRef, onLeave }: { inputRef: RefObject<HTMLInputElement | null>; onLeave: () => void }) {
+  const t = useT();
   const filter = useMcp((s) => s.activity.filter);
   const log = useMcp((s) => s.activity.log);
   const clients = useMcp((s) => s.clients);
@@ -196,51 +195,51 @@ function Toolbar({ inputRef, onLeave }: { inputRef: RefObject<HTMLInputElement |
   const clientOptions = options(
     [...clients].sort(byName).map((c) => ({ value: c.id, label: c.name })),
     filter.clientId,
-    () => log.entries.find((e) => e.clientId === filter.clientId)?.clientName ?? "Deleted client",
+    () => log.entries.find((e) => e.clientId === filter.clientId)?.clientName ?? t("mcp.activity.deletedClient"),
   );
   const sourceOptions = options(
     [...sources].sort(byName).map((s) => ({ value: s.id, label: s.name })),
     filter.dataSourceId,
-    () => log.entries.find((e) => e.dataSourceId === filter.dataSourceId)?.dataSourceName ?? "Deleted data source",
+    () => log.entries.find((e) => e.dataSourceId === filter.dataSourceId)?.dataSourceName ?? t("mcp.activity.deletedSource"),
   );
 
   return (
     <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border px-1.5">
       <SearchField inputRef={inputRef} onLeave={onLeave} />
       <FilterSelect
-        label="Client"
-        all="All clients"
+        label={t("mcp.activity.client")}
+        all={t("mcp.activity.allClients")}
         value={filter.clientId}
         options={clientOptions}
         onChange={(clientId) => setActivityFilter({ clientId })}
       />
       <FilterSelect
-        label="Data source"
-        all="All data sources"
+        label={t("mcp.activity.dataSource")}
+        all={t("mcp.activity.allSources")}
         value={filter.dataSourceId}
         options={sourceOptions}
         onChange={(dataSourceId) => setActivityFilter({ dataSourceId })}
       />
       <FilterSelect
-        label="Decision"
-        all="All decisions"
+        label={t("mcp.activity.decision")}
+        all={t("mcp.activity.allDecisions")}
         value={filter.decision}
         options={(Object.keys(DECISION_LABEL) as Decision[]).map((d) => ({ value: d, label: DECISION_LABEL[d] }))}
         onChange={(decision) => setActivityFilter({ decision: decision as Decision | null })}
       />
       {isFiltered(filter) && (
-        <IconButton label="Clear Filters" className="size-6" onClick={clearActivityFilter}>
+        <IconButton label={t("mcp.activity.clearFilters")} className="size-6" onClick={clearActivityFilter}>
           <X className="size-3.5" />
         </IconButton>
       )}
       <span
         className="ml-auto shrink-0 px-1.5 text-[11px] text-subtle tabular-nums"
-        title={log.exhausted ? undefined : "Older entries load as you scroll down"}
+        title={log.exhausted ? undefined : t("mcp.activity.olderHint")}
       >
-        {count.toLocaleString("en-US")}
-        {!log.exhausted && count > 0 && "+"} {count === 1 && log.exhausted ? "entry" : "entries"}
+        {formatNumber(count)}
+        {!log.exhausted && count > 0 && "+"} {t(count === 1 && log.exhausted ? "mcp.activity.entry" : "mcp.activity.entries")}
       </span>
-      <IconButton label="Refresh" className="size-6" onClick={() => void reloadActivity()}>
+      <IconButton label={t("command.explorer.refresh")} className="size-6" onClick={() => void reloadActivity()}>
         <RefreshCw className="size-3.5" />
       </IconButton>
     </div>
@@ -262,6 +261,7 @@ interface Option {
 
 /** Searches the SQL as you type. ↓ and Esc (when empty) go to the list; Esc clears first. */
 function SearchField({ inputRef, onLeave }: { inputRef: RefObject<HTMLInputElement | null>; onLeave: () => void }) {
+  const t = useT();
   const search = useMcp((s) => s.activity.filter.search);
   const [text, setText] = useState(search);
   // The search last sent to the store, to tell its changes from ours.
@@ -305,8 +305,8 @@ function SearchField({ inputRef, onLeave }: { inputRef: RefObject<HTMLInputEleme
       <Search className="size-3.5 shrink-0 text-subtle" />
       <input
         ref={inputRef}
-        aria-label="Search SQL"
-        placeholder="Search SQL"
+        aria-label={t("mcp.activity.searchSql")}
+        placeholder={t("mcp.activity.searchSql")}
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={onKeyDown}
@@ -369,6 +369,7 @@ function ActivityList({
   filtered: boolean;
   selectedId: number | null;
 }) {
+  const t = useT();
   const { entries } = log;
   const sources = useDataSources((s) => s.sources);
   const now = useNow(60_000);
@@ -458,9 +459,9 @@ function ActivityList({
       empty = <LoaderCircle className="size-4 animate-spin text-subtle" />;
     } else if (!log.error && filtered) {
       empty = (
-        <EmptyState icon={SearchX} title="No activity matches these filters">
+        <EmptyState icon={SearchX} title={t("mcp.activity.noMatch")}>
           <Button className="mt-1" onClick={clearActivityFilter}>
-            Clear Filters
+            {t("mcp.activity.clearFilters")}
           </Button>
         </EmptyState>
       );
@@ -479,13 +480,13 @@ function ActivityList({
           className="absolute top-2 left-1/2 z-10 flex h-6 -translate-x-1/2 items-center gap-1 rounded-full bg-accent px-2.5 text-[11.5px] font-medium text-accent-fg shadow-popover hover:brightness-110"
         >
           <ArrowUp className="size-3" />
-          {unseen.toLocaleString("en-US")} new
+          {t("mcp.activity.new", { count: formatNumber(unseen) })}
         </button>
       )}
       <div
         ref={setRefs}
         role="listbox"
-        aria-label="MCP activity"
+        aria-label={t("mcp.activity.listLabel")}
         tabIndex={0}
         aria-activedescendant={rendered ? `mcp-audit-${selectedId}` : undefined}
         onKeyDown={onKeyDown}
@@ -522,10 +523,11 @@ function ActivityList({
 
 /** Under the last row: what is older, if anything. */
 function LogFooter({ log, filtered }: { log: ActivityLog; filtered: boolean }) {
+  const t = useT();
   if (log.loading) {
     return (
       <span className="flex items-center gap-1.5">
-        <LoaderCircle className="size-3.5 animate-spin" /> Loading older entries…
+        <LoaderCircle className="size-3.5 animate-spin" /> {t("mcp.activity.loadingOlder")}
       </span>
     );
   }
@@ -534,18 +536,18 @@ function LogFooter({ log, filtered }: { log: ActivityLog; filtered: boolean }) {
       <span className="flex min-w-0 items-center gap-2 px-3 text-danger">
         <CircleAlert className="size-3.5 shrink-0" />
         <span className="selectable truncate" title={log.error}>
-          Couldn't read the log: {log.error}
+          {t("mcp.activity.readFailed", { error: log.error })}
         </span>
         <Button className="h-6 shrink-0" onClick={() => void loadOlderActivity()}>
-          Retry
+          {t("mcp.banner.retry")}
         </Button>
       </span>
     );
   }
-  if (log.exhausted) return <span>{filtered ? "No older entries match" : "Start of the log"}</span>;
+  if (log.exhausted) return <span>{filtered ? t("mcp.activity.noOlderMatch") : t("mcp.activity.startOfLog")}</span>;
   return (
     <Button variant="ghost" className="h-6" onClick={() => void loadOlderActivity()}>
-      Load Older
+      {t("mcp.activity.loadOlder")}
     </Button>
   );
 }
@@ -565,6 +567,7 @@ function ActivityRow({
   selected: boolean;
   now: number;
 }) {
+  const t = useT();
   const counted = countLabel(entry);
   const blocker = consoleBlocker(entry, !!source);
   const kind = entry.statementKind ? `${entry.tool} · ${entry.statementKind}` : entry.tool;
@@ -596,7 +599,7 @@ function ActivityRow({
               {entry.dataSourceName && (
                 <span
                   className="flex min-w-10 shrink-[2] items-center gap-1 text-muted"
-                  title={source ? undefined : `${entry.dataSourceName} no longer exists`}
+                  title={source ? undefined : t("mcp.activity.sourceGoneShort", { name: entry.dataSourceName })}
                 >
                   <SourceDot source={source} />
                   <span className="truncate">{entry.dataSourceName}</span>
@@ -616,7 +619,7 @@ function ActivityRow({
             </div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 leading-4">
               {entry.error && (
-                <span role="img" aria-label="Failed" title={entry.error} className="shrink-0 text-danger">
+                <span role="img" aria-label={t("mcp.activity.failed")} title={entry.error} className="shrink-0 text-danger">
                   <CircleAlert className="size-3" />
                 </span>
               )}
@@ -630,25 +633,25 @@ function ActivityRow({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem label="Open in Console" disabled={blocker !== null} onSelect={() => openInConsole(entry)} />
+        <ContextMenuItem label={t("mcp.activity.openInConsole")} disabled={blocker !== null} onSelect={() => openInConsole(entry)} />
         <ContextMenuItem
-          label="Copy SQL"
+          label={t("mcp.activity.copySql")}
           disabled={entry.sql === null}
           onSelect={() => void navigator.clipboard.writeText(entry.sql ?? "")}
         />
         <ContextMenuSeparator />
         <ContextMenuItem
-          label={`Only ${entry.clientName}`}
+          label={t("mcp.activity.only", { name: entry.clientName })}
           disabled={entry.clientId === null}
           onSelect={() => setActivityFilter({ clientId: entry.clientId })}
         />
         <ContextMenuItem
-          label={`Only ${entry.dataSourceName ?? "This Data Source"}`}
+          label={t("mcp.activity.only", { name: entry.dataSourceName ?? t("mcp.activity.thisSource") })}
           disabled={entry.dataSourceId === null}
           onSelect={() => setActivityFilter({ dataSourceId: entry.dataSourceId })}
         />
         <ContextMenuItem
-          label={`Only ${DECISION_LABEL[entry.decision]}`}
+          label={t("mcp.activity.only", { name: DECISION_LABEL[entry.decision] })}
           onSelect={() => setActivityFilter({ decision: entry.decision })}
         />
       </ContextMenuContent>

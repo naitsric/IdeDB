@@ -3,6 +3,7 @@ import { useSearchEverywhere } from "../commands/SearchEverywhere";
 import { useConsoles } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
 import { useTheme, type ThemePreference } from "../theme";
+import { useT } from "../i18n";
 import { EngineIcon } from "../ui/EngineIcon";
 import { IconButton, Kbd } from "../ui/primitives";
 import { useWorkbench } from "./bridge";
@@ -15,6 +16,7 @@ const THEME_ICON = { system: SunMoon, light: Sun, dark: Moon };
  * traffic lights sit on the left and the whole bar drags the window.
  */
 export function TitleBar() {
+  const t = useT();
   const show = useSearchEverywhere((s) => s.show);
   const { preference, setPreference } = useTheme();
   const activeConsoleId = useWorkbench((s) => s.activeConsoleId);
@@ -46,14 +48,14 @@ export function TitleBar() {
         className="flex h-6 w-[min(360px,40vw)] items-center gap-2 rounded-md border border-border bg-inset px-2 text-[12px] text-subtle transition-colors hover:border-border-strong hover:text-muted"
       >
         <Search className="size-3.5" />
-        Search Everywhere
+        {t("titlebar.searchEverywhere")}
         <span className="ml-auto">
           <Kbd>⇧⇧</Kbd>
         </span>
       </button>
 
       <div data-tauri-drag-region className="flex flex-1 justify-end">
-        <IconButton label={`Theme: ${preference}`} onClick={() => setPreference(NEXT_THEME[preference])}>
+        <IconButton label={t("titlebar.theme", { theme: t(`theme.${preference}`) })} onClick={() => setPreference(NEXT_THEME[preference])}>
           <ThemeIcon className="size-4" />
         </IconButton>
       </div>

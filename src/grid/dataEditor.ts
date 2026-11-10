@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type { Engine, TableInfo, TableRef } from "../db/api";
 import { effectiveSchema, setPendingChangesProbe, useConsoles, type ConsoleState, type ResultMeta } from "../db/consoles";
 import { useDataSources } from "../db/dataSources";
+import { t } from "../i18n";
 import { changeCount, NO_EDITS, type PendingEdits } from "./edits";
 
 /**
@@ -115,23 +116,23 @@ export function editorTarget(entry: ConsoleState | undefined, result: ResultMeta
   const source = sources.find((s) => s.id === entry.dataSourceId);
   const explorer = explorers[entry.dataSourceId];
   const load = explorer?.models[result.table.schema];
-  if (!source || load?.state !== "loaded") return { editable: false, reason: "Reading the table structure…" };
+  if (!source || load?.state !== "loaded") return { editable: false, reason: t("editor.reading") };
 
   const info = tableInfo(entry, result);
-  if (!info) return { editable: false, reason: "Read-only: table not found in the schema" };
-  if (info.kind !== "table") return { editable: false, reason: "Read-only: views cannot be edited" };
-  if (result.status === "running") return { editable: false, reason: "Rows are still loading" };
-  if (result.status === "error") return { editable: false, reason: "Read-only: the query failed" };
+  if (!info) return { editable: false, reason: t("editor.notFound") };
+  if (info.kind !== "table") return { editable: false, reason: t("editor.view") };
+  if (result.status === "running") return { editable: false, reason: t("editor.loading") };
+  if (result.status === "error") return { editable: false, reason: t("editor.failed") };
   // Rows shift when a submit lands; edits made meanwhile would point at the wrong rows.
-  if (useGrids.getState().submitting[result.id]) return { editable: false, reason: "Saving changes…" };
+  if (useGrids.getState().submitting[result.id]) return { editable: false, reason: t("editor.saving") };
 
   const columnNames = result.columns.map((c) => c.name);
   const keys = info.columns
     .filter((c) => c.primaryKey !== null)
     .sort((a, b) => a.primaryKey! - b.primaryKey!)
     .map((c) => columnNames.indexOf(c.name));
-  if (keys.length === 0) return { editable: false, reason: "Read-only: the table has no primary key" };
-  if (keys.includes(-1)) return { editable: false, reason: "Read-only: the result does not include the primary key" };
+  if (keys.length === 0) return { editable: false, reason: t("editor.noPk") };
+  if (keys.includes(-1)) return { editable: false, reason: t("editor.pkMissing") };
 
   return {
     editable: true,

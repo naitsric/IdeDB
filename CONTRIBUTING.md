@@ -53,6 +53,7 @@ dev/seed/            sample data loaded into the Docker databases and CI
 src/                 React UI
   commands/          command registry, keymap, app commands, Search Everywhere
   menu/              native menu bar model, built from the command registry
+  i18n/              translations: one file per language in locales/ (en is the base)
   actions.ts         user-level actions shared by commands, menus and search
   workbench/         window chrome, dockable panels (explorer, consoles, result tabs)
   editor/            SQL editor (CodeMirror 6): statement splitting, completion (with
@@ -229,3 +230,17 @@ downloaded without authentication.
 - New driver behavior gets a conformance check in `idedb_core::testing`, run by
   every driver; UI logic gets vitest tests (extract pure functions where
   needed).
+
+## Translations
+
+UI text comes from `src/i18n/locales/<code>.ts`, never from the components:
+`const t = useT()` in a component, `t("key")` elsewhere. English (`en.ts`) is
+the base: add the key there first, then to every other language (a test
+requires the same keys; a text missing in a language shows in English).
+Command names are the `command.<id>` keys and categories `category.<name>`.
+
+To add a language, copy `en.ts` to `<code>.ts` (for example `fr.ts`), translate
+the values and set its `name`. It is picked up on its own: the language shows
+up in Appearance as "Language: <name>" and the app follows the system language
+when it has a file for it. Technical terms (Commit, Rollback, Data Source,
+Console, MCP) are kept in English.

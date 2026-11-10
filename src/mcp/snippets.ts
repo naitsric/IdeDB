@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 /**
  * What to paste into an MCP client to reach IdeDB. A token is only known
  * right after it is created or regenerated; everywhere else the snippets
@@ -75,23 +76,23 @@ export function snippets(
 ): Snippet[] {
   const url = endpointUrl(port);
   return [
-    { id: "claudeCode", label: "Claude Code", hint: "Run in a terminal.", text: claudeCodeSnippet(url, token) },
+    { id: "claudeCode", label: "Claude Code", hint: t("mcp.snippet.claudeCode"), text: claudeCodeSnippet(url, token) },
     {
       id: "claudeDesktop",
       label: "Claude Desktop",
-      hint: "Add to claude_desktop_config.json (Settings → Developer → Edit Config), then restart Claude.",
+      hint: t("mcp.snippet.claudeDesktop"),
       text: claudeDesktopSnippet(bridgeCommand, port, token),
     },
     {
       id: "cursor",
       label: "Cursor",
-      hint: "Add to ~/.cursor/mcp.json, or .cursor/mcp.json in a project.",
+      hint: t("mcp.snippet.cursor"),
       text: cursorSnippet(url, token),
     },
     {
       id: "other",
-      label: "Other Clients",
-      hint: "Any client that speaks MCP over Streamable HTTP.",
+      label: t("mcp.snippet.otherLabel"),
+      hint: t("mcp.snippet.other"),
       text: genericSnippet(url, token),
     },
   ];

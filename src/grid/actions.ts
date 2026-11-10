@@ -32,6 +32,7 @@ import {
   setCell,
   toChanges,
 } from "./edits";
+import { formatNumber, t } from "../i18n";
 import { EXPORT_EXTENSION, toCsv, toInserts, toJson, toJsonObjects, toTsv, type ExportFormat } from "./format";
 
 /**
@@ -192,7 +193,7 @@ export async function submit() {
   const fail = (message: string, row: number) =>
     useGrids.setState((s) => ({ failures: { ...s.failures, [resultId]: { message, row } } }));
   if (sessionId === undefined) {
-    fail("Not connected: run the query again to reconnect.", -1);
+    fail(t("grid.notConnected"), -1);
     return;
   }
 
@@ -272,7 +273,8 @@ export async function copySelection(format: CopyFormat) {
   await navigator.clipboard.writeText(text);
 }
 
-const EXPORT_LABEL: Record<ExportFormat, string> = { tsv: "TSV", csv: "CSV", json: "JSON", sql: "SQL INSERT statements" };
+const exportLabel = (format: ExportFormat): string =>
+  ({ tsv: "TSV", csv: "CSV", json: "JSON", sql: t("export.sqlLabel") })[format];
 const EXPORT_CHUNK_ROWS = 5000;
 
 /**
@@ -288,22 +290,22 @@ export async function exportResult(format: ExportFormat) {
   const notice = (message: string) => useGrids.setState((s) => ({ notices: { ...s.notices, [grid.result.id]: message } }));
 
   if (grid.result.more === "open") {
-    const fetchAll = await ask(`Only ${grid.result.rowCount.toLocaleString("en-US")} rows are loaded.`, {
-      title: "Fetch all rows before exporting?",
-      okLabel: "Fetch All",
-      cancelLabel: "Export Loaded Rows",
+    const fetchAll = await ask(t("export.onlyLoaded", { count: formatNumber(grid.result.rowCount) }), {
+      title: t("export.fetchAllTitle"),
+      okLabel: t("export.fetchAll"),
+      cancelLabel: t("export.exportLoaded"),
     });
     if (fetchAll) await useConsoles.getState().fetchMore(grid.entry.id, grid.result.id, true);
   }
   const result = useConsoles.getState().consoles[grid.entry.id]?.results.find((r) => r.id === grid.result.id);
   if (!result) return;
   // A cancelled fetch leaves rows behind: say so rather than export them silently short.
-  const partial = result.more !== "none" ? " (not all rows: re-run and fetch all to include the rest)" : "";
+  const partial = result.more !== "none" ? t("export.partial") : "";
   let target: { token: number; fileName: string } | null;
   try {
-    target = await api.exportBegin(`${result.table?.name ?? "result"}.${extension}`, EXPORT_LABEL[format], extension);
+    target = await api.exportBegin(`${result.table?.name ?? "result"}.${extension}`, exportLabel(format), extension);
   } catch (e) {
-    notice(`Export failed: ${errorMessage(e)}`);
+    notice(t("export.failed", { error: errorMessage(e) }));
     return;
   }
   if (!target) return;
@@ -336,9 +338,9 @@ export async function exportResult(format: ExportFormat) {
       }
       await api.exportWrite(target.token, chunk);
     }
-    notice(`Exported ${total.toLocaleString("en-US")} rows to ${target.fileName}${partial}`);
+    notice(t("export.done", { count: formatNumber(total), file: target.fileName }) + partial);
   } catch (e) {
-    notice(`Export failed: ${errorMessage(e)}`);
+    notice(t("export.failed", { error: errorMessage(e) }));
   } finally {
     void api.exportFinish(target.token).catch(() => {});
   }

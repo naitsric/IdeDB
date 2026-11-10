@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { Tree, type NodeApi, type NodeRendererProps, type TreeApi } from "react-arborist";
 import { openTableData } from "../actions";
 import { useDataSources } from "../db/dataSources";
+import { useLocale, useT } from "../i18n";
 import {
   CommandItem,
   ContextMenuContent,
@@ -36,6 +37,8 @@ const ROW_HEIGHT = 24;
 const STATUS_TONE = { connected: "success", connecting: "warning", error: "danger" } as const;
 
 export function DatabaseTree() {
+  const t = useT();
+  const locale = useLocale();
   const { sources, explorers, showSystemSchemas, connect, loadSchema, toggleSystemSchemas } = useDataSources();
   const [openTables, setOpenTables] = useState<ReadonlySet<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -46,7 +49,7 @@ export function DatabaseTree() {
 
   const data = useMemo(
     () => buildTree(sources, explorers, showSystemSchemas, openTables),
-    [sources, explorers, showSystemSchemas, openTables],
+    [sources, explorers, showSystemSchemas, openTables, locale],
   );
 
   // Go to Declaration: load whatever the path needs, one step per render, then select the node.
@@ -168,7 +171,7 @@ export function DatabaseTree() {
               }
               onToggle={onToggle}
               onSelect={(nodes) => useExplorerSelection.setState({ selection: toSelection(nodes[0]?.data) })}
-              aria-label="Database Explorer"
+              aria-label={t("command.view.toolWindow.explorer")}
               className="outline-none"
             >
               {(props) => <Row {...props} query={query} onActivate={activate} onMenu={setMenuNode} />}
@@ -277,6 +280,7 @@ function Highlight({ text, query }: { text: string; query: string }) {
 }
 
 function NodeMenu({ node }: { node: TreeNode }) {
+  useLocale();
   const connected = useDataSources((s) => s.explorers[node.sourceId]?.status === "connected");
   return (
     <ContextMenuContent>

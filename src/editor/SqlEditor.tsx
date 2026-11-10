@@ -23,6 +23,7 @@ import { editorApi } from "./editorApi";
 import { currentStatementHighlight, flashField, intellijKeymap, statementsField } from "./extensions";
 import { registerEditor } from "./registry";
 import { editorHighlighting, editorTheme } from "./theme";
+import { useT } from "../i18n";
 
 interface SqlEditorProps {
   consoleId: string;
@@ -36,11 +37,23 @@ interface SqlEditorProps {
   lint: LintBackend;
 }
 
+const contentAttributes = (label: string) =>
+  EditorView.contentAttributes.of({
+    "aria-label": label,
+    spellcheck: "false",
+    autocorrect: "off",
+    autocapitalize: "off",
+  });
+
 /** The console's SQL editor: CodeMirror 6 with dialect-aware highlighting and completion. */
 export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog, lint }: SqlEditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const language = useRef(new Compartment());
+  const attributes = useRef(new Compartment());
+  const t = useT();
+  const tRef = useRef(t);
+  tRef.current = t;
   const latest = useRef({ initialValue, onChange, catalog, lint });
   latest.current = { initialValue, onChange, catalog, lint };
 
@@ -94,12 +107,7 @@ export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog, 
           EditorView.updateListener.of((update) => {
             if (update.docChanged) latest.current.onChange(update.state.doc.toString());
           }),
-          EditorView.contentAttributes.of({
-            "aria-label": "SQL console",
-            spellcheck: "false",
-            autocorrect: "off",
-            autocapitalize: "off",
-          }),
+          attributes.current.of(contentAttributes(tRef.current("editor.ariaLabel"))),
         ],
       }),
     });
@@ -116,6 +124,12 @@ export function SqlEditor({ consoleId, engine, initialValue, onChange, catalog, 
   useEffect(() => {
     view.current?.dispatch({ effects: language.current.reconfigure(sqlLanguageSupport(engine, catalog)) });
   }, [engine, catalog]);
+
+  // The editor's accessible name follows the language.
+  const ariaLabel = t("editor.ariaLabel");
+  useEffect(() => {
+    view.current?.dispatch({ effects: attributes.current.reconfigure(contentAttributes(ariaLabel)) });
+  }, [ariaLabel]);
 
   return <div ref={host} data-focus-context="editor" className="size-full overflow-hidden" />;
 }

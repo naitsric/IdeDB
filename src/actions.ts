@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { effectiveSchema, useConsoles } from "./db/consoles";
 import { useDataSources } from "./db/dataSources";
 import { selectAll, tableQuery } from "./db/sql";
@@ -92,7 +93,7 @@ export async function runStatements(consoleId: string, statements: readonly Stat
   for (const [i, statement] of statements.entries()) {
     editor?.flash(statement);
     const result = await useConsoles.getState().runStatement(consoleId, statement.text, { newTab: i > 0 });
-    if (result?.status === "error") editor?.showError(statement, result.error ?? "Error", result.errorPosition);
+    if (result?.status === "error") editor?.showError(statement, result.error ?? t("common.error"), result.errorPosition);
     if (result?.status !== "done") return;
   }
 }

@@ -1,4 +1,5 @@
 import type { Value } from "../db/api";
+import { formatNumber, t } from "../i18n";
 
 export interface Aggregates {
   /** Selected cells. */
@@ -39,16 +40,16 @@ export function aggregate(values: Iterable<Value>): Aggregates {
   return { count, numeric: { sum, avg: sum / numbers, min, max } };
 }
 
-const decimal = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
+const decimal = { format: (n: number) => formatNumber(n, { maximumFractionDigits: 6 }) };
 
 export function formatAggregates({ count, numeric }: Aggregates): string {
-  const parts = [`${decimal.format(count)} ${count === 1 ? "cell" : "cells"}`];
+  const parts = [`${decimal.format(count)} ${t(count === 1 ? "aggregate.cell" : "aggregate.cells")}`];
   if (numeric && count > 1) {
     parts.push(
-      `sum ${decimal.format(numeric.sum)}`,
-      `avg ${decimal.format(numeric.avg)}`,
-      `min ${decimal.format(numeric.min)}`,
-      `max ${decimal.format(numeric.max)}`,
+      `${t("aggregate.sum")} ${decimal.format(numeric.sum)}`,
+      `${t("aggregate.avg")} ${decimal.format(numeric.avg)}`,
+      `${t("aggregate.min")} ${decimal.format(numeric.min)}`,
+      `${t("aggregate.max")} ${decimal.format(numeric.max)}`,
     );
   }
   return parts.join(" · ");

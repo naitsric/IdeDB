@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import type { DataSource } from "../db/api";
 import type { Access, Grant } from "./api";
 
@@ -15,10 +16,10 @@ export function unavailableReason(source: DataSource): string | null {
   const { engine, path } = source.params;
   if (engine === "sqlite") {
     return path.trim().startsWith("file:")
-      ? "Its path is a file: URI, which IdeDB can't open read-only. Use a plain file path."
+      ? t("mcp.grants.fileUri")
       : null;
   }
-  return source.savePassword ? null : "Its password isn't saved, and MCP clients never get asked for one.";
+  return source.savePassword ? null : t("mcp.grants.noPassword");
 }
 
 export function grantLevel(grants: readonly Grant[], dataSourceId: string): GrantLevel {
@@ -42,11 +43,11 @@ export function levelBlocked(
   context: { revoked: boolean; unavailable: string | null; neverWrite: boolean },
 ): string | null {
   if (level === current) return null;
-  if (context.revoked) return "A revoked client gets no access.";
+  if (context.revoked) return t("mcp.grants.revoked");
   if (level === "none") return null;
   if (context.unavailable) return context.unavailable;
   if (level === "write" && context.neverWrite && current !== "write") {
-    return "Never write is on for this data source.";
+    return t("mcp.grants.neverWrite");
   }
   return null;
 }

@@ -1,5 +1,6 @@
 import type { ColumnInfo, DataSource, Engine, ObjectKind } from "../db/api";
 import type { ExplorerState } from "../db/dataSources";
+import { t } from "../i18n";
 
 /**
  * Explorer tree model: data source → schema → tables/views → columns.
@@ -58,9 +59,9 @@ function dataSourceChildren(
 ): TreeNode[] {
   if (!explorer) return [];
   if (explorer.status === "connecting" || (explorer.status === "connected" && !explorer.schemas)) {
-    return [message(parentId, sourceId, "Connecting…", "loading")];
+    return [message(parentId, sourceId, t("tree.connecting"), "loading")];
   }
-  if (explorer.status === "error") return [message(parentId, sourceId, explorer.error ?? "Connection failed", "error")];
+  if (explorer.status === "error") return [message(parentId, sourceId, explorer.error ?? t("tree.connectionFailed"), "error")];
 
   const defaultSchema = explorer.server?.defaultSchema;
   const schemas = (explorer.schemas ?? [])
@@ -73,7 +74,7 @@ function dataSourceChildren(
       id,
       name: schema.name,
       kind: "schema",
-      detail: schema.name === defaultSchema ? "default" : undefined,
+      detail: schema.name === defaultSchema ? t("tree.default") : undefined,
       sourceId,
       schema: schema.name,
       children: schemaChildren(id, sourceId, schema.name, explorer, openTables),
@@ -90,7 +91,7 @@ function schemaChildren(
 ): TreeNode[] {
   const load = explorer.models[schema];
   if (!load) return [];
-  if (load.state === "loading") return [message(parentId, sourceId, "Loading…", "loading")];
+  if (load.state === "loading") return [message(parentId, sourceId, t("tree.loading"), "loading")];
   if (load.state === "error") return [message(parentId, sourceId, load.error, "error")];
 
   const tables = load.model.tables.filter((t) => t.kind === "table" || t.kind === "foreignTable");
@@ -101,7 +102,7 @@ function schemaChildren(
     const groupId = `gr:${sourceId}/${schema}/${label}`;
     groups.push({
       id: groupId,
-      name: label,
+      name: t(label === "tables" ? "tree.tables" : "tree.views"),
       kind: "group",
       detail: String(items.length),
       sourceId,
